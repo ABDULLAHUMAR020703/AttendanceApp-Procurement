@@ -1,4 +1,14 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
+
 const backendBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
+
+/** Thrown when Supabase has no usable session (caller should send user to login). */
+export class NoSessionError extends Error {
+  constructor(message = 'Not signed in') {
+    super(message);
+    this.name = 'NoSessionError';
+  }
+}
 
 export function formatPkr(amount: number) {
   if (!Number.isFinite(amount)) return '—';
@@ -55,4 +65,24 @@ export async function authedFetch<T>(
     throw new ApiError(res.status, body);
   }
   return (await res.json()) as T;
+}
+
+/** Fresh JWT from Supabase before each request (avoids stale React state after refresh). */
+export async function getAccessTokenFromSupabaseSession(supabase: SupabaseClient | null): Promise<string> {
+  if (!supabase) throw new NoSessionError();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  if (!token) throw new NoSessionError();
+  return token;
+}
+
+export async function authedFetchWithSupabase<T>(
+  supabase: SupabaseClient | null,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const token = await getAccessTokenFromSupabaseSession(supabase);
+  return authedFetch<T>(path, token, init);
 }

@@ -1,8 +1,9 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { createClient, type Session } from '@supabase/supabase-js';
+import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { useQueryClient } from '@tanstack/react-query';
+import { getBrowserSupabase } from '../../lib/supabase-browser';
 
 export type UserRole =
   | 'super_admin'
@@ -24,6 +25,7 @@ export type UserProfile = {
 };
 
 type AuthContextValue = {
+  supabase: SupabaseClient | null;
   session: Session | null;
   accessToken: string | null;
   profile: UserProfile | null;
@@ -41,8 +43,6 @@ export function useAuth() {
   return ctx;
 }
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
 const backendBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -53,21 +53,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const accessToken = session?.access_token ?? null;
 
-  const supabase = useMemo(() => {
-    if (!supabaseUrl || !supabaseAnonKey) return null;
-    return createClient(supabaseUrl, supabaseAnonKey, {
-      auth: { persistSession: true, autoRefreshToken: true },
-    });
-  }, []);
+  const supabase = useMemo(() => getBrowserSupabase(), []);
 
   const refreshProfile = async () => {
-    if (!accessToken) {
+    if (!supabase) {
+      setProfile(null);
+      return;
+    }
+
+    const {
+      data: { session: fresh },
+    } = await supabase.auth.getSession();
+    const token = fresh?.access_token;
+    if (!token) {
       setProfile(null);
       return;
     }
 
     const res = await fetch(`${backendBase}/api/auth/me`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error('Failed to fetch profile from backend');
     const json = (await res.json()) as { user: UserProfile };
@@ -121,6 +125,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<AuthContextValue>(
     () => ({
+      supabase,
       session,
       accessToken,
       profile,
@@ -140,7 +145,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       refreshProfile,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [session, profile, loading, accessToken, queryClient],
+    [supabase, session, profile, loading, accessToken, queryClient],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

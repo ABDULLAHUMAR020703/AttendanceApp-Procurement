@@ -1,33 +1,37 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
 import { AppLayout } from '../../components/AppLayout';
 import { Card } from '../../components/ui/Card';
 import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { useAuth } from '../../features/auth/AuthProvider';
-import { authedFetch } from '../../lib/api';
+import { authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 
 type DashboardResponse = {
-  role: string;
-  projects: Array<{ id: string }>;
-  pendingApprovals: Array<{ id: string }>;
-  pendingExceptions: Array<{ id: string }>;
-  poUtilization: Array<{ id: string; total_value: number; remaining_value: number }>;
+  projects: number;
+  pendingApprovals: number;
+  pendingExceptions: number;
+  poRecords: number;
 };
 
-function formatPkr(amount: number) {
-  return `${new Intl.NumberFormat('en-PK', { maximumFractionDigits: 2 }).format(amount)} PKR`;
-}
-
 export default function DashboardPage() {
-  const { profile, accessToken, session } = useAuth() as any;
-  const token = accessToken as string | null;
+  const router = useRouter();
+  const { profile, accessToken, session, supabase } = useAuth();
+  const token = accessToken;
 
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['dashboard'],
-    enabled: !!token,
-    queryFn: () => authedFetch<DashboardResponse>('/api/dashboard', token!),
+    enabled: !!token && !!supabase,
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<DashboardResponse>(supabase, '/api/dashboard');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
   });
 
   return (
@@ -50,28 +54,19 @@ export default function DashboardPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <Card className="p-4">
               <div className="text-sm text-muted-foreground">Projects</div>
-              <div className="text-2xl font-semibold mt-1">{data?.projects?.length ?? 0}</div>
+              <div className="text-2xl font-semibold mt-1">{data?.projects ?? 0}</div>
             </Card>
             <Card className="p-4">
               <div className="text-sm text-muted-foreground">Pending Approvals</div>
-              <div className="text-2xl font-semibold mt-1">{data?.pendingApprovals?.length ?? 0}</div>
+              <div className="text-2xl font-semibold mt-1">{data?.pendingApprovals ?? 0}</div>
             </Card>
             <Card className="p-4">
               <div className="text-sm text-muted-foreground">Pending Exceptions</div>
-              <div className="text-2xl font-semibold mt-1">{data?.pendingExceptions?.length ?? 0}</div>
-            </Card>
-            <Card className="p-4 border-emerald-500/25 bg-emerald-500/5">
-              <div className="text-sm text-muted-foreground">Remaining Budget Across POs</div>
-              <div className="text-2xl font-semibold mt-1 text-emerald-200">
-                {formatPkr(
-                  (data?.poUtilization ?? []).reduce((sum, po) => sum + Number(po.remaining_value ?? 0), 0),
-                )}
-              </div>
-              <div className="text-xs text-muted-foreground mt-1">Sum of remaining_value on all loaded POs</div>
+              <div className="text-2xl font-semibold mt-1">{data?.pendingExceptions ?? 0}</div>
             </Card>
             <Card className="p-4">
               <div className="text-sm text-muted-foreground">PO Records</div>
-              <div className="text-2xl font-semibold mt-1">{data?.poUtilization?.length ?? 0}</div>
+              <div className="text-2xl font-semibold mt-1">{data?.poRecords ?? 0}</div>
             </Card>
           </div>
         )}

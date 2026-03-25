@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
 import { AppLayout } from '../../components/AppLayout';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -10,7 +11,7 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
-import { ApiError, authedFetch } from '../../lib/api';
+import { ApiError, authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 
 type PurchaseOrder = { id: string; po_number: string; vendor: string; total_value: number; remaining_value: number };
 type ProjectPurchaseOrderSnapshot = { total_value: number; remaining_value: number };
@@ -91,8 +92,9 @@ const ROLES_WITH_PO_LIST = new Set<string>([
 ]);
 
 export default function ProjectsPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
-  const { accessToken, profile } = useAuth();
+  const { accessToken, profile, supabase } = useAuth();
   const token = accessToken ?? '';
 
   const {
@@ -101,8 +103,15 @@ export default function ProjectsPage() {
     error: poError,
   } = useQuery({
     queryKey: ['po', 'list'],
-    enabled: !!token && ROLES_WITH_PO_LIST.has(profile?.role ?? ''),
-    queryFn: () => authedFetch<{ purchaseOrders: PurchaseOrder[] }>('/api/po', token),
+    enabled: !!token && !!supabase && ROLES_WITH_PO_LIST.has(profile?.role ?? ''),
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ purchaseOrders: PurchaseOrder[] }>(supabase, '/api/po');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
   });
 
   const {
@@ -112,8 +121,15 @@ export default function ProjectsPage() {
     error: projectsError,
   } = useQuery({
     queryKey: ['projects', 'list'],
-    enabled: !!token,
-    queryFn: () => authedFetch<{ projects: Project[] }>('/api/projects', token),
+    enabled: !!token && !!supabase,
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ projects: Project[] }>(supabase, '/api/projects');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
   });
 
   const canCreate =
@@ -134,7 +150,14 @@ export default function ProjectsPage() {
   const archiveMutation = useMutation({
     mutationFn: async (id: string) => {
       setArchiveError(null);
-      return authedFetch<{ ok: boolean; status: string }>(`/api/projects/${id}`, token, { method: 'DELETE' });
+      try {
+        return await authedFetchWithSupabase<{ ok: boolean; status: string }>(supabase, `/api/projects/${id}`, {
+          method: 'DELETE',
+        });
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
     },
     onSuccess: () => {
       setArchiveTarget(null);
@@ -158,11 +181,16 @@ export default function ProjectsPage() {
       } else {
         payload.po_id = poId ? poId : null;
       }
-      return authedFetch<any>('/api/projects', token, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      } as any);
+      try {
+        return await authedFetchWithSupabase<unknown>(supabase, '/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
     },
     onSuccess: () => {
       setError(null);

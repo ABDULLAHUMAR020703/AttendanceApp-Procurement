@@ -1,6 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
 import { AppLayout } from '../../components/AppLayout';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -8,7 +9,7 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
-import { authedFetch } from '../../lib/api';
+import { authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 import { useState } from 'react';
 
 type Approval = {
@@ -22,27 +23,44 @@ type Approval = {
 };
 
 export default function ApprovalsPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
-  const { accessToken } = useAuth();
+  const { accessToken, supabase } = useAuth();
   const token = accessToken ?? '';
   const [comments, setComments] = useState<Record<string, string>>({});
 
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['approvals', 'mine'],
-    enabled: !!token,
-    queryFn: () => authedFetch<{ approvals: Approval[] }>('/api/approvals', token),
+    enabled: !!token && !!supabase,
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ approvals: Approval[] }>(supabase, '/api/approvals');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
   });
 
   const decisionMutation = useMutation({
     mutationFn: async (params: { approvalId: string; decision: 'approved' | 'rejected' }) => {
-      return authedFetch('/api/approvals/' + params.approvalId + '/decision', token, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          decision: params.decision,
-          comments: (comments[params.approvalId] ?? '').trim() || undefined,
-        }),
-      } as any);
+      try {
+        return await authedFetchWithSupabase<unknown>(
+          supabase,
+          '/api/approvals/' + params.approvalId + '/decision',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              decision: params.decision,
+              comments: (comments[params.approvalId] ?? '').trim() || undefined,
+            }),
+          },
+        );
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['approvals'] });

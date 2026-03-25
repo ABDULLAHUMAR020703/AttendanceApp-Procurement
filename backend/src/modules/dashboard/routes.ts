@@ -1,49 +1,42 @@
 import { Router } from 'express';
 import { requireAuth } from '../../middleware/auth';
 import { supabaseAdmin } from '../../config/supabase';
-import { AppError } from '../../utils/errors';
-
 export const dashboardRouter = Router();
 
 dashboardRouter.use(requireAuth);
 
-const PROJECT_FULL_VISIBILITY_ROLES = new Set(['admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm']);
-
-dashboardRouter.get('/', async (req, res, next) => {
+dashboardRouter.get('/', async (_req, res, next) => {
   try {
-    const role = req.auth!.role;
-    const userId = req.auth!.userId;
-
-    let projectsQuery = supabaseAdmin
-      .from('projects')
-      .select('id')
-      .neq('status', 'archived')
-      .order('created_at', { ascending: false })
-      .limit(20);
-    if (!PROJECT_FULL_VISIBILITY_ROLES.has(role)) {
-      projectsQuery = projectsQuery.eq('created_by', userId);
-    }
-
-    // Enterprise-grade implementations typically do per-role optimized queries.
-    // We keep it simple here while still returning real aggregated data.
-    const [{ data: projects }, { data: pendingApprovals }, { data: pendingExceptions }, { data: poUtil }] = await Promise.all([
-      projectsQuery,
-      supabaseAdmin.from('approvals').select('id').eq('approver_id', userId).eq('status', 'pending').limit(50),
-      supabaseAdmin.from('exceptions').select('id').eq('status', 'pending').limit(50),
-      supabaseAdmin.from('purchase_orders').select('id, total_value, remaining_value').limit(200),
+    const [
+      { count: projectsCount, error: projectsErr },
+      { count: pendingApprovalsCount, error: approvalsErr },
+      { count: pendingExceptionsCount, error: exceptionsErr },
+      { count: poRecordsCount, error: poErr },
+    ] = await Promise.all([
+      supabaseAdmin.from('projects').select('*', { count: 'exact', head: true }),
+      supabaseAdmin
+        .from('approvals')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'pending'),
+      supabaseAdmin
+        .from('exceptions')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'pending'),
+      supabaseAdmin.from('purchase_orders').select('*', { count: 'exact', head: true }),
     ]);
 
-    if (!projects || !pendingApprovals || !pendingExceptions || !poUtil) throw new AppError('Failed to build dashboard', 500);
+    if (projectsErr) throw projectsErr;
+    if (approvalsErr) throw approvalsErr;
+    if (exceptionsErr) throw exceptionsErr;
+    if (poErr) throw poErr;
 
     res.json({
-      role,
-      projects: projects ?? [],
-      pendingApprovals: pendingApprovals ?? [],
-      pendingExceptions: pendingExceptions ?? [],
-      poUtilization: poUtil ?? [],
+      projects: projectsCount ?? 0,
+      pendingApprovals: pendingApprovalsCount ?? 0,
+      pendingExceptions: pendingExceptionsCount ?? 0,
+      poRecords: poRecordsCount ?? 0,
     });
   } catch (err) {
     next(err);
   }
 });
-

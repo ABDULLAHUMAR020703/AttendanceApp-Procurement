@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
 import { AppLayout } from '../../../components/AppLayout';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
@@ -9,11 +10,12 @@ import { Input } from '../../../components/ui/Input';
 import { PageContainer } from '../../../components/ui/PageContainer';
 import { PageHeader } from '../../../components/ui/PageHeader';
 import { useAuth } from '../../../features/auth/AuthProvider';
+import { getAccessTokenFromSupabaseSession, NoSessionError } from '../../../lib/api';
 
 export default function PoUploadPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
-  const { accessToken, profile } = useAuth();
-  const token = accessToken ?? '';
+  const { profile, supabase } = useAuth();
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,12 +31,19 @@ export default function PoUploadPage() {
     }
     setLoading(true);
     try {
+      let bearer: string;
+      try {
+        bearer = await getAccessTokenFromSupabaseSession(supabase);
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
       const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
       const fd = new FormData();
       fd.append('file', file);
       const res = await fetch(`${apiBase}/api/po/upload`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${bearer}` },
         body: fd,
       });
       const json = await res.json().catch(() => ({}));

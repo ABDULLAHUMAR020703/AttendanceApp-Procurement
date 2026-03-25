@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useRouter } from 'next/navigation';
 import { AppLayout } from '../../components/AppLayout';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -10,7 +11,7 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
-import { ApiError, authedFetch, formatPkr } from '../../lib/api';
+import { ApiError, authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../lib/api';
 
 type ProjectPurchaseOrderSnapshot = { total_value: number; remaining_value: number };
 type Project = {
@@ -46,8 +47,9 @@ function availableBudgetForProject(p: Project | undefined): number | null {
 }
 
 export default function PurchaseRequestsPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
-  const { accessToken } = useAuth();
+  const { accessToken, supabase } = useAuth();
   const token = accessToken ?? '';
   const [projectId, setProjectId] = useState('');
   const [description, setDescription] = useState('');
@@ -57,14 +59,31 @@ export default function PurchaseRequestsPage() {
 
   const { data: projectsData } = useQuery({
     queryKey: ['projects', 'for-pr'],
-    enabled: !!token,
-    queryFn: () => authedFetch<{ projects: Project[] }>('/api/projects', token),
+    enabled: !!token && !!supabase,
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ projects: Project[] }>(supabase, '/api/projects');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
   });
 
   const { data: prData, isLoading: prLoading, isFetching: prFetching } = useQuery({
     queryKey: ['purchase-requests', 'list'],
-    enabled: !!token,
-    queryFn: () => authedFetch<{ purchaseRequests: PurchaseRequest[] }>('/api/purchase-requests', token),
+    enabled: !!token && !!supabase,
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ purchaseRequests: PurchaseRequest[] }>(
+          supabase,
+          '/api/purchase-requests',
+        );
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
   });
 
   const projects = useMemo(() => (projectsData?.projects ?? []) as Project[], [projectsData]);
@@ -83,6 +102,13 @@ export default function PurchaseRequestsPage() {
       if (!document) throw new Error('Document upload is required');
 
       const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
+      let bearer: string;
+      try {
+        bearer = await getAccessTokenFromSupabaseSession(supabase);
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
       const fd = new FormData();
       fd.append('project_id', projectId);
       fd.append('description', description);
@@ -91,7 +117,7 @@ export default function PurchaseRequestsPage() {
 
       const res = await fetch(`${apiBase}/api/purchase-requests`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${bearer}` },
         body: fd,
       });
       let body: Record<string, unknown> = {};
