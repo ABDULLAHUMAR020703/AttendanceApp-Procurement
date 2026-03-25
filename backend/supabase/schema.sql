@@ -1,0 +1,127 @@
+-- Procurement Management System (PMS) - Supabase schema
+-- Notes:
+-- - Uses UUID primary keys and timestamptz timestamps.
+-- - "reference_id" in exceptions is intentionally polymorphic (can point to projects or purchase_requests).
+
+create extension if not exists pgcrypto;
+
+-- USERS (application profile for RBAC)
+create table if not exists public.users (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  email text not null unique,
+  role text not null check (role in ('admin','pm','team_lead','finance','dept_head','gm')),
+  department text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists users_department_idx on public.users (department);
+create index if not exists users_role_idx on public.users (role);
+
+-- PURCHASE ORDERS (PO)
+create table if not exists public.purchase_orders (
+  id uuid primary key default gen_random_uuid(),
+  po_number text not null unique,
+  vendor text not null,
+  total_value numeric(20, 2) not null check (total_value >= 0),
+  remaining_value numeric(20, 2) not null check (remaining_value >= 0),
+  uploaded_by uuid not null references public.users (id),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists purchase_orders_remaining_idx on public.purchase_orders (remaining_value);
+
+-- PROJECTS
+create table if not exists public.projects (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  po_id uuid references public.purchase_orders (id) on delete set null,
+  budget numeric(20, 2) not null check (budget >= 0),
+  created_by uuid not null references public.users (id),
+  status text not null default 'active',
+  is_exception boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists projects_po_idx on public.projects (po_id);
+create index if not exists projects_created_by_idx on public.projects (created_by);
+create index if not exists projects_status_idx on public.projects (status);
+
+-- PURCHASE REQUESTS (PR)
+create table if not exists public.purchase_requests (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  description text not null,
+  amount numeric(20, 2) not null check (amount > 0),
+  document_url text,
+  status text not null default 'pending' check (status in ('pending','approved','rejected','pending_exception')),
+  created_by uuid not null references public.users (id),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists purchase_requests_project_idx on public.purchase_requests (project_id);
+create index if not exists purchase_requests_status_idx on public.purchase_requests (status);
+
+-- APPROVALS (multi-level, sequential by role order)
+create table if not exists public.approvals (
+  id uuid primary key default gen_random_uuid(),
+  request_id uuid not null references public.purchase_requests (id) on delete cascade,
+  approver_id uuid not null references public.users (id),
+  role text not null check (role in ('team_lead','pm','finance','gm')),
+  status text not null default 'pending' check (status in ('pending','approved','rejected')),
+  comments text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists approvals_request_idx on public.approvals (request_id);
+create index if not exists approvals_approver_idx on public.approvals (approver_id);
+create unique index if not exists approvals_request_role_unique on public.approvals (request_id, role);
+
+-- Exceptions (pause/resume the main flow)
+-- type: no_po, over_budget
+create table if not exists public.exceptions (
+  id uuid primary key default gen_random_uuid(),
+  type text not null check (type in ('no_po','over_budget')),
+  reference_id uuid not null,
+  status text not null default 'pending' check (status in ('pending','approved','rejected')),
+  approved_by uuid references public.users (id),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists exceptions_type_status_idx on public.exceptions (type, status);
+
+-- AUDIT LOGS
+create table if not exists public.audit_logs (
+  id uuid primary key default gen_random_uuid(),
+  action text not null,
+  user_id uuid references public.users (id),
+  entity text not null,
+  entity_id uuid not null,
+  timestamp timestamptz not null default now()
+);
+
+create index if not exists audit_logs_entity_idx on public.audit_logs (entity, entity_id);
+
+-- IN-APP NOTIFICATIONS
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users (id),
+  type text not null,
+  message text not null,
+  is_read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists notifications_user_idx on public.notifications (user_id, is_read);
+
+-- EMAIL OUTBOX (placeholder for "send email" without SMTP)
+create table if not exists public.email_outbox (
+  id uuid primary key default gen_random_uuid(),
+  to_email text not null,
+  subject text not null,
+  body text not null,
+  status text not null default 'queued' check (status in ('queued','sent','failed')),
+  created_at timestamptz not null default now()
+);
+
