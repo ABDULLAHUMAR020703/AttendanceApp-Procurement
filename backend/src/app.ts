@@ -9,11 +9,14 @@ import { apiRouter } from './routes';
 export function createApp() {
   const app = express();
 
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: false, // disable CSP for now to allow API calls
+    }),
+  );
   app.use(
     cors({
-      origin: env.CORS_ORIGIN ?? true,
-      credentials: true,
+      origin: '*', // allow all for now (can restrict later)
     }),
   );
   app.use(
