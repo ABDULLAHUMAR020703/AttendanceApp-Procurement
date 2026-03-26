@@ -22,10 +22,17 @@ type Approval = {
   created_at: string;
 };
 
+const APPROVAL_ORDER = ['team_lead', 'pm', 'finance', 'gm'] as const;
+
+function orderIndex(role: string) {
+  const idx = APPROVAL_ORDER.indexOf(role as (typeof APPROVAL_ORDER)[number]);
+  return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
+}
+
 export default function ApprovalsPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { accessToken, supabase } = useAuth();
+  const { accessToken, supabase, profile } = useAuth();
   const token = accessToken ?? '';
   const [comments, setComments] = useState<Record<string, string>>({});
 
@@ -39,6 +46,29 @@ export default function ApprovalsPage() {
         if (e instanceof NoSessionError) router.replace('/login');
         throw e;
       }
+    },
+  });
+
+  const requestIds = (data?.approvals ?? []).map((a) => a.request_id);
+  const uniqueRequestIds = [...new Set(requestIds)];
+  const { data: approvalsByRequest } = useQuery({
+    queryKey: ['approvals', 'by-request', uniqueRequestIds.join(',')],
+    enabled: !!token && !!supabase && uniqueRequestIds.length > 0,
+    queryFn: async () => {
+      const { data: rows, error } = await supabase!
+        .from('approvals')
+        .select('id, request_id, approver_id, role, status, comments, created_at')
+        .in('request_id', uniqueRequestIds);
+      if (error) throw error;
+      const grouped: Record<string, Approval[]> = {};
+      for (const row of (rows ?? []) as Approval[]) {
+        if (!grouped[row.request_id]) grouped[row.request_id] = [];
+        grouped[row.request_id].push(row);
+      }
+      for (const key of Object.keys(grouped)) {
+        grouped[key].sort((a, b) => orderIndex(a.role) - orderIndex(b.role));
+      }
+      return grouped;
     },
   });
 
@@ -110,6 +140,33 @@ export default function ApprovalsPage() {
 
             {(data?.approvals ?? []).map((a) => (
               <Card key={a.id} className="p-4 space-y-3">
+                {(() => {
+                  const chain = approvalsByRequest?.[a.request_id] ?? [a];
+                  const currentStep = chain.find((step) => step.status === 'pending');
+                  const isCurrentRole = !!currentStep && profile?.role === currentStep.role;
+                  const canDecide = a.status === 'pending' && isCurrentRole;
+
+                  return (
+                    <>
+                      <div className="rounded-lg border border-white/10 bg-[#2a2640]/60 p-3">
+                        <div className="text-xs text-muted-foreground mb-2">Approval flow</div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          {chain.map((step) => {
+                            const isCurrent = currentStep?.id === step.id;
+                            const indicator = step.status === 'approved' ? '✅' : isCurrent ? '🔵' : '⏳';
+                            return (
+                              <span key={step.id} className="inline-flex items-center gap-1 rounded border border-white/10 px-2 py-1">
+                                <span>{indicator}</span>
+                                <span>{step.role}</span>
+                              </span>
+                            );
+                          })}
+                        </div>
+                        {!canDecide && currentStep ? (
+                          <div className="mt-2 text-xs text-amber-200">Pending {currentStep.role} approval</div>
+                        ) : null}
+                      </div>
+
                 <div className="flex items-start justify-between gap-4">
                   <div className="space-y-1">
                     <div className="text-sm text-muted-foreground">Request: {a.request_id}</div>
@@ -132,7 +189,7 @@ export default function ApprovalsPage() {
                 <div className="flex flex-wrap gap-3">
                   <Button
                     variant="success"
-                    disabled={a.status !== 'pending' || decisionMutation.isPending}
+                    disabled={!canDecide || decisionMutation.isPending}
                     onClick={() => decisionMutation.mutate({ approvalId: a.id, decision: 'approved' })}
                     type="button"
                   >
@@ -140,13 +197,16 @@ export default function ApprovalsPage() {
                   </Button>
                   <Button
                     variant="danger"
-                    disabled={a.status !== 'pending' || decisionMutation.isPending}
+                    disabled={!canDecide || decisionMutation.isPending}
                     onClick={() => decisionMutation.mutate({ approvalId: a.id, decision: 'rejected' })}
                     type="button"
                   >
                     Reject
                   </Button>
                 </div>
+                    </>
+                  );
+                })()}
               </Card>
             ))}
             {(data?.approvals ?? []).length === 0 ? (
