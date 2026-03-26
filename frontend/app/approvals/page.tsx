@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { AppLayout } from '../../components/AppLayout';
@@ -35,6 +36,10 @@ export default function ApprovalsPage() {
   const { accessToken, supabase, profile } = useAuth();
   const token = accessToken ?? '';
   const [comments, setComments] = useState<Record<string, string>>({});
+  const [overrideTarget, setOverrideTarget] = useState<string | null>(null);
+  const [overrideDecision, setOverrideDecision] = useState<'approved' | 'rejected'>('approved');
+  const [overrideReason, setOverrideReason] = useState('');
+  const isAdmin = profile?.role === 'admin';
 
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['approvals', 'mine'],
@@ -93,6 +98,30 @@ export default function ApprovalsPage() {
       }
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['approvals'] });
+      queryClient.invalidateQueries({ queryKey: ['purchase-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+
+  const overrideMutation = useMutation({
+    mutationFn: async (params: { requestId: string; decision: 'approved' | 'rejected'; reason: string }) => {
+      try {
+        return await authedFetchWithSupabase<unknown>(supabase, '/api/approvals/override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params),
+        });
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+    onSuccess: () => {
+      setOverrideTarget(null);
+      setOverrideReason('');
+      setOverrideDecision('approved');
       queryClient.invalidateQueries({ queryKey: ['approvals'] });
       queryClient.invalidateQueries({ queryKey: ['purchase-requests'] });
       queryClient.invalidateQueries({ queryKey: ['projects'] });
@@ -167,43 +196,65 @@ export default function ApprovalsPage() {
                         ) : null}
                       </div>
 
-                <div className="flex items-start justify-between gap-4">
-                  <div className="space-y-1">
-                    <div className="text-sm text-muted-foreground">Request: {a.request_id}</div>
-                    <div className="text-sm text-muted-foreground">Stage role: {a.role}</div>
-                    <div className="text-sm text-muted-foreground">Status: {a.status}</div>
-                  </div>
-                </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="text-sm text-muted-foreground">
+                            Request:{' '}
+                            {isAdmin ? (
+                              <Link className="text-purple-300 underline" href={`/purchase-requests/${a.request_id}`}>
+                                {a.request_id}
+                              </Link>
+                            ) : (
+                              a.request_id
+                            )}
+                          </div>
+                          <div className="text-sm text-muted-foreground">Stage role: {a.role}</div>
+                          <div className="text-sm text-muted-foreground">Status: {a.status}</div>
+                        </div>
+                        {isAdmin ? (
+                          <Button
+                            variant="secondary"
+                            type="button"
+                            onClick={() => {
+                              setOverrideTarget(a.request_id);
+                              setOverrideReason('');
+                              setOverrideDecision('approved');
+                            }}
+                          >
+                            Override
+                          </Button>
+                        ) : null}
+                      </div>
 
-                <div className="space-y-2">
-                  <label className="block text-sm font-medium">Comments (optional)</label>
-                  <textarea
-                    value={comments[a.id] ?? ''}
-                    onChange={(e) => setComments((prev) => ({ ...prev, [a.id]: e.target.value }))}
-                    className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
-                    rows={3}
-                    placeholder="Add a decision comment"
-                  />
-                </div>
+                      <div className="space-y-2">
+                        <label className="block text-sm font-medium">Comments (optional)</label>
+                        <textarea
+                          value={comments[a.id] ?? ''}
+                          onChange={(e) => setComments((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                          className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
+                          rows={3}
+                          placeholder="Add a decision comment"
+                        />
+                      </div>
 
-                <div className="flex flex-wrap gap-3">
-                  <Button
-                    variant="success"
-                    disabled={!canDecide || decisionMutation.isPending}
-                    onClick={() => decisionMutation.mutate({ approvalId: a.id, decision: 'approved' })}
-                    type="button"
-                  >
-                    Approve
-                  </Button>
-                  <Button
-                    variant="danger"
-                    disabled={!canDecide || decisionMutation.isPending}
-                    onClick={() => decisionMutation.mutate({ approvalId: a.id, decision: 'rejected' })}
-                    type="button"
-                  >
-                    Reject
-                  </Button>
-                </div>
+                      <div className="flex flex-wrap gap-3">
+                        <Button
+                          variant="success"
+                          disabled={!canDecide || decisionMutation.isPending}
+                          onClick={() => decisionMutation.mutate({ approvalId: a.id, decision: 'approved' })}
+                          type="button"
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          variant="danger"
+                          disabled={!canDecide || decisionMutation.isPending}
+                          onClick={() => decisionMutation.mutate({ approvalId: a.id, decision: 'rejected' })}
+                          type="button"
+                        >
+                          Reject
+                        </Button>
+                      </div>
                     </>
                   );
                 })()}
@@ -214,6 +265,62 @@ export default function ApprovalsPage() {
             ) : null}
           </div>
         )}
+        {overrideTarget && isAdmin ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
+            <Card className="max-w-md w-full p-6 space-y-4 border border-white/15 shadow-xl">
+              <h3 className="text-lg font-medium">Admin Override</h3>
+              <p className="text-sm text-muted-foreground">Request: {overrideTarget}</p>
+              <div className="space-y-2">
+                <label className="block text-sm font-medium">Decision</label>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant={overrideDecision === 'approved' ? 'success' : 'secondary'}
+                    onClick={() => setOverrideDecision('approved')}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={overrideDecision === 'rejected' ? 'danger' : 'secondary'}
+                    onClick={() => setOverrideDecision('rejected')}
+                  >
+                    Reject
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm font-medium">Reason (required)</label>
+                <textarea
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
+                  rows={4}
+                  placeholder="Enter override reason"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={() => setOverrideTarget(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  variant={overrideDecision === 'approved' ? 'success' : 'danger'}
+                  disabled={!overrideReason.trim() || overrideMutation.isPending}
+                  onClick={() =>
+                    overrideMutation.mutate({
+                      requestId: overrideTarget,
+                      decision: overrideDecision,
+                      reason: overrideReason.trim(),
+                    })
+                  }
+                >
+                  {overrideMutation.isPending ? 'Applying...' : 'Apply Override'}
+                </Button>
+              </div>
+            </Card>
+          </div>
+        ) : null}
       </PageContainer>
     </AppLayout>
   );

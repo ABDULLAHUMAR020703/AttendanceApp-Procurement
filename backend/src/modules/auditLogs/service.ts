@@ -5,12 +5,14 @@ export async function writeAuditLog(params: {
   userId: string;
   entity: string;
   entityId: string;
+  reason?: string;
 }) {
   const { error } = await supabaseAdmin.from('audit_logs').insert({
     action: params.action,
     user_id: params.userId,
     entity: params.entity,
     entity_id: params.entityId,
+    reason: params.reason ?? null,
     timestamp: new Date().toISOString(),
   });
   if (error) throw error;

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
@@ -49,13 +50,18 @@ function availableBudgetForProject(p: Project | undefined): number | null {
 export default function PurchaseRequestsPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { accessToken, supabase } = useAuth();
+  const { accessToken, supabase, profile } = useAuth();
   const token = accessToken ?? '';
   const [projectId, setProjectId] = useState('');
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState<number>(0);
   const [document, setDocument] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [overrideTarget, setOverrideTarget] = useState<string | null>(null);
+  const [overrideDecision, setOverrideDecision] = useState<'approved' | 'rejected'>('approved');
+  const [overrideReason, setOverrideReason] = useState('');
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+  const isAdmin = profile?.role === 'admin';
 
   const { data: projectsData } = useQuery({
     queryKey: ['projects', 'for-pr'],
@@ -92,14 +98,16 @@ export default function PurchaseRequestsPage() {
   const availableBudget = useMemo(() => availableBudgetForProject(selectedProject), [selectedProject]);
   const isOverBudget =
     availableBudget != null && Number.isFinite(amount) && amount > 0 && amount > availableBudget;
+  const descriptionTrimmed = description.trim();
+  const descriptionInvalid = descriptionTrimmed.length < 10;
 
   const mutation = useMutation({
     mutationFn: async () => {
       setError(null);
       if (!projectId) throw new Error('Select a project');
       if (!description.trim()) throw new Error('Description is required');
+      if (description.trim().length < 10) throw new Error('Description must be at least 10 characters');
       if (!amount || amount <= 0) throw new Error('Amount must be > 0');
-      if (!document) throw new Error('Document upload is required');
 
       const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
       let bearer: string;
@@ -113,7 +121,7 @@ export default function PurchaseRequestsPage() {
       fd.append('project_id', projectId);
       fd.append('description', description);
       fd.append('amount', String(amount));
-      fd.append('document', document);
+      if (document) fd.append('document', document);
 
       const res = await fetch(`${apiBase}/api/purchase-requests`, {
         method: 'POST',
@@ -132,6 +140,7 @@ export default function PurchaseRequestsPage() {
     },
     onSuccess: () => {
       setError(null);
+      setSubmitAttempted(false);
       queryClient.invalidateQueries({ queryKey: ['purchase-requests'] });
       queryClient.invalidateQueries({ queryKey: ['approvals'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
@@ -142,6 +151,31 @@ export default function PurchaseRequestsPage() {
       setDocument(null);
     },
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'PR creation failed'),
+  });
+
+  const overrideMutation = useMutation({
+    mutationFn: async (params: { requestId: string; decision: 'approved' | 'rejected'; reason: string }) => {
+      try {
+        return await authedFetchWithSupabase<unknown>(supabase, '/api/approvals/override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params),
+        });
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+    onSuccess: () => {
+      setOverrideTarget(null);
+      setOverrideReason('');
+      setOverrideDecision('approved');
+      queryClient.invalidateQueries({ queryKey: ['purchase-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['approvals'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    },
+    onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Override failed'),
   });
 
   return (
@@ -161,6 +195,11 @@ export default function PurchaseRequestsPage() {
             className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4"
             onSubmit={(e) => {
               e.preventDefault();
+              setSubmitAttempted(true);
+              if (descriptionInvalid) {
+                setError('Description is required');
+                return;
+              }
               mutation.mutate();
             }}
           >
@@ -205,8 +244,12 @@ export default function PurchaseRequestsPage() {
               <Input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
+                className={submitAttempted && descriptionInvalid ? 'border-rose-500 focus:ring-rose-500/70 focus:border-rose-400/70' : undefined}
                 required
               />
+              {submitAttempted && descriptionInvalid ? (
+                <p className="text-sm text-rose-300">Description is required (minimum 10 characters).</p>
+              ) : null}
             </div>
 
             <div className="space-y-2">
@@ -228,7 +271,7 @@ export default function PurchaseRequestsPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="block text-sm font-medium">Document</label>
+              <label className="block text-sm font-medium">Upload Document (Optional)</label>
               <Input
                 type="file"
                 accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx"
@@ -241,7 +284,7 @@ export default function PurchaseRequestsPage() {
 
             <Button
               className="md:col-span-2"
-              disabled={mutation.isPending || isOverBudget}
+              disabled={mutation.isPending || isOverBudget || descriptionInvalid}
               type="submit"
             >
               {mutation.isPending ? 'Submitting...' : 'Submit PR'}
@@ -262,6 +305,7 @@ export default function PurchaseRequestsPage() {
                     <TH>Amount</TH>
                     <TH>Status</TH>
                     <TH>Request</TH>
+                    {isAdmin ? <TH>Actions</TH> : null}
                   </TR>
                 </THead>
                 <TBody>
@@ -270,7 +314,30 @@ export default function PurchaseRequestsPage() {
                       <TD>{pr.description}</TD>
                       <TD>{pr.amount}</TD>
                       <TD>{pr.status}</TD>
-                      <TD>PR: {pr.id.slice(0, 8)}...</TD>
+                      <TD>
+                        {isAdmin ? (
+                          <Link className="text-purple-300 underline" href={`/purchase-requests/${pr.id}`}>
+                            PR: {pr.id.slice(0, 8)}...
+                          </Link>
+                        ) : (
+                          <>PR: {pr.id.slice(0, 8)}...</>
+                        )}
+                      </TD>
+                      {isAdmin ? (
+                        <TD>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={() => {
+                              setOverrideTarget(pr.id);
+                              setOverrideDecision('approved');
+                              setOverrideReason('');
+                            }}
+                          >
+                            Override
+                          </Button>
+                        </TD>
+                      ) : null}
                     </TR>
                   ))}
                 </TBody>
@@ -281,6 +348,62 @@ export default function PurchaseRequestsPage() {
             <div className="text-sm text-muted-foreground">No purchase requests found.</div>
           ) : null}
         </Card>
+        {overrideTarget && isAdmin ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
+            <Card className="max-w-md w-full p-6 space-y-4 border border-white/15 shadow-xl">
+              <h3 className="text-lg font-medium">Admin Override</h3>
+              <p className="text-sm text-muted-foreground">Request: {overrideTarget}</p>
+              <div className="space-y-2">
+                <label className="block text-sm font-medium">Decision</label>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant={overrideDecision === 'approved' ? 'success' : 'secondary'}
+                    onClick={() => setOverrideDecision('approved')}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={overrideDecision === 'rejected' ? 'danger' : 'secondary'}
+                    onClick={() => setOverrideDecision('rejected')}
+                  >
+                    Reject
+                  </Button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm font-medium">Reason (required)</label>
+                <textarea
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
+                  rows={4}
+                  placeholder="Enter override reason"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={() => setOverrideTarget(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  variant={overrideDecision === 'approved' ? 'success' : 'danger'}
+                  disabled={!overrideReason.trim() || overrideMutation.isPending}
+                  onClick={() =>
+                    overrideMutation.mutate({
+                      requestId: overrideTarget,
+                      decision: overrideDecision,
+                      reason: overrideReason.trim(),
+                    })
+                  }
+                >
+                  {overrideMutation.isPending ? 'Applying...' : 'Apply Override'}
+                </Button>
+              </div>
+            </Card>
+          </div>
+        ) : null}
       </PageContainer>
     </AppLayout>
   );

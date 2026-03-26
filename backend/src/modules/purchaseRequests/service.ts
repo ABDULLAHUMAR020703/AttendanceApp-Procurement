@@ -17,15 +17,15 @@ export async function createPurchaseRequest(params: {
   projectId: string;
   description: string;
   amount: number;
-  documentFile: { buffer: Buffer; originalName: string; mimeType: string };
+  documentFile?: { buffer: Buffer; originalName: string; mimeType: string } | null;
   createdBy: string;
   actorDepartment?: string | null;
 }) {
   const { projectId, description, amount, documentFile, createdBy } = params;
 
-  if (!description.trim()) throw new AppError('description is required', 400);
+  if (!description.trim()) throw new AppError('Description is required', 400);
+  if (description.trim().length < 10) throw new AppError('Description must be at least 10 characters', 400);
   if (!Number.isFinite(amount) || amount <= 0) throw new AppError('amount must be > 0', 400);
-  if (!documentFile?.buffer) throw new AppError('document upload is required', 400);
 
   const { data: project, error: prjErr } = await supabaseAdmin
     .from('projects')
@@ -60,19 +60,21 @@ export async function createPurchaseRequest(params: {
     });
   }
 
-  const bucket = env.SUPABASE_STORAGE_BUCKET_DOCUMENTS;
-  const safeExt = documentFile.originalName.includes('.')
-    ? documentFile.originalName.slice(documentFile.originalName.lastIndexOf('.'))
-    : '';
-  const path = `pr-documents/${projectId}/${Date.now()}-${createdBy}${safeExt}`.replace(/\\/g, '/');
+  let documentUrl: string | null = null;
+  if (documentFile?.buffer) {
+    const bucket = env.SUPABASE_STORAGE_BUCKET_DOCUMENTS;
+    const safeExt = documentFile.originalName.includes('.')
+      ? documentFile.originalName.slice(documentFile.originalName.lastIndexOf('.'))
+      : '';
+    const path = `pr-documents/${projectId}/${Date.now()}-${createdBy}${safeExt}`.replace(/\\/g, '/');
 
-  const { error: upErr } = await supabaseAdmin.storage.from(bucket).upload(path, documentFile.buffer, {
-    contentType: documentFile.mimeType,
-    upsert: true,
-  });
-  if (upErr) throw upErr;
-
-  const documentUrl = `${env.SUPABASE_URL}/storage/v1/object/public/${bucket}/${path}`;
+    const { error: upErr } = await supabaseAdmin.storage.from(bucket).upload(path, documentFile.buffer, {
+      contentType: documentFile.mimeType,
+      upsert: true,
+    });
+    if (upErr) throw upErr;
+    documentUrl = `${env.SUPABASE_URL}/storage/v1/object/public/${bucket}/${path}`;
+  }
 
   const prPayload = {
     project_id: project.id,

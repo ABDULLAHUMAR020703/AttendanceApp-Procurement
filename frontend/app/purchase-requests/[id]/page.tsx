@@ -1,0 +1,268 @@
+'use client';
+
+import Link from 'next/link';
+import { useParams, useRouter } from 'next/navigation';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AppLayout } from '../../../components/AppLayout';
+import { Button } from '../../../components/ui/Button';
+import { Card } from '../../../components/ui/Card';
+import { PageContainer } from '../../../components/ui/PageContainer';
+import { PageHeader } from '../../../components/ui/PageHeader';
+import { useAuth } from '../../../features/auth/AuthProvider';
+import { authedFetchWithSupabase, formatPkr, NoSessionError } from '../../../lib/api';
+import { useState } from 'react';
+
+type ApprovalRow = {
+  id: string;
+  request_id: string;
+  approver_id: string;
+  role: string;
+  status: string;
+  comments: string | null;
+  created_at: string;
+  approver?: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+};
+
+type DetailResponse = {
+  purchaseRequest: {
+    id: string;
+    title: string;
+    description: string;
+    amount: number;
+    status: string;
+    createdAt: string;
+    documentUrl: string | null;
+    currentStage: string | null;
+    createdBy: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+  };
+  project: { id: string; name: string; po_id: string | null; budget: number; status: string } | null;
+  purchaseOrder: { id: string; po_number: string; vendor: string; total_value: number; remaining_value: number } | null;
+  approvals: ApprovalRow[];
+  exceptions: Array<{ id: string; type: string; status: string; approved_by: string | null; created_at: string }>;
+  auditLogs: Array<{
+    id: string;
+    action: string;
+    user_id: string;
+    entity: string;
+    entity_id: string;
+    reason?: string | null;
+    timestamp: string;
+  }>;
+};
+
+export default function PurchaseRequestDetailsPage() {
+  const params = useParams<{ id: string }>();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const { accessToken, supabase, profile } = useAuth();
+  const requestId = params?.id ?? '';
+  const isAdmin = profile?.role === 'admin';
+  const [overrideDecision, setOverrideDecision] = useState<'approved' | 'rejected'>('approved');
+  const [overrideReason, setOverrideReason] = useState('');
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['purchase-request-detail', requestId],
+    enabled: !!accessToken && !!supabase && !!requestId && isAdmin,
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<DetailResponse>(supabase, `/api/purchase-requests/${requestId}`);
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+  });
+
+  const overrideMutation = useMutation({
+    mutationFn: async () => {
+      try {
+        return await authedFetchWithSupabase<unknown>(supabase, '/api/approvals/override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requestId,
+            decision: overrideDecision,
+            reason: overrideReason.trim(),
+          }),
+        });
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+    onSuccess: () => {
+      setOverrideReason('');
+      queryClient.invalidateQueries({ queryKey: ['purchase-request-detail', requestId] });
+      queryClient.invalidateQueries({ queryKey: ['purchase-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['approvals'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+
+  if (!isAdmin) {
+    return (
+      <AppLayout>
+        <PageContainer>
+          <Card className="p-6 text-sm text-rose-300">This page is only available to admin users.</Card>
+        </PageContainer>
+      </AppLayout>
+    );
+  }
+
+  return (
+    <AppLayout>
+      <PageContainer className="space-y-6">
+        <PageHeader title="Purchase Request Detail" subtitle={requestId} />
+        <div className="flex gap-2">
+          <Link href="/purchase-requests">
+            <Button type="button" variant="secondary">
+              Back to list
+            </Button>
+          </Link>
+        </div>
+
+        {isLoading ? <Card className="p-4 text-sm text-muted-foreground">Loading...</Card> : null}
+
+        {error ? (
+          <Card className="p-4 text-sm text-rose-300">
+            Failed to load purchase request
+          </Card>
+        ) : !data || !data.purchaseRequest ? (
+          <Card className="p-4 text-sm text-muted-foreground">No purchase request found.</Card>
+        ) : (
+          <>
+            <Card className="p-6 space-y-3">
+              <h2 className="text-lg font-medium">Overview</h2>
+              <div className="text-sm text-muted-foreground">Purchase Request ID: {data.purchaseRequest.id}</div>
+              <div className="text-sm text-muted-foreground">Title: {data.purchaseRequest.title}</div>
+              <div className="text-sm text-muted-foreground">Description: {data.purchaseRequest.description}</div>
+              <div className="text-sm text-muted-foreground">Requested Amount: {formatPkr(Number(data.purchaseRequest.amount))}</div>
+              <div className="text-sm text-muted-foreground">
+                Created By: {data.purchaseRequest.createdBy?.name ?? data.purchaseRequest.createdBy?.email ?? data.purchaseRequest.createdBy?.id ?? 'Unknown'}
+              </div>
+              <div className="text-sm text-muted-foreground">Created At: {new Date(data.purchaseRequest.createdAt).toLocaleString()}</div>
+              <div className="text-sm text-muted-foreground">Current Status: {data.purchaseRequest.status}</div>
+              <div className="text-sm text-muted-foreground">Current Stage: {data.purchaseRequest.currentStage ?? 'Completed'}</div>
+            </Card>
+
+            <Card className="p-6 space-y-3">
+              <h2 className="text-lg font-medium">Financial Info</h2>
+              <div className="text-sm text-muted-foreground">Associated Project: {data.project?.name ?? 'None'}</div>
+              <div className="text-sm text-muted-foreground">Project Status: {data.project?.status ?? 'N/A'}</div>
+              <div className="text-sm text-muted-foreground">
+                PO Vendor: {data.purchaseOrder?.vendor ?? 'No linked PO'}
+              </div>
+              <div className="text-sm text-muted-foreground">
+                PO Total Budget: {data.purchaseOrder ? formatPkr(Number(data.purchaseOrder.total_value)) : 'N/A'}
+              </div>
+              <div className="text-sm text-muted-foreground">
+                PO Remaining Budget: {data.purchaseOrder ? formatPkr(Number(data.purchaseOrder.remaining_value)) : 'N/A'}
+              </div>
+            </Card>
+
+            <Card className="p-6 space-y-3">
+              <h2 className="text-lg font-medium">Approval Timeline</h2>
+              {data.approvals.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No approvals found.</div>
+              ) : (
+                <div className="space-y-2">
+                  {data.approvals.map((a) => (
+                    <div key={a.id} className="rounded border border-white/10 px-3 py-2 text-sm">
+                      <div className="font-medium">{a.role} - {a.status}</div>
+                      <div className="text-muted-foreground">
+                        By: {a.approver?.name ?? a.approver?.email ?? a.approver_id}
+                      </div>
+                      <div className="text-muted-foreground">Time: {new Date(a.created_at).toLocaleString()}</div>
+                      {a.comments ? <div className="text-muted-foreground">Comment: {a.comments}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            <Card className="p-6 space-y-3">
+              <h2 className="text-lg font-medium">Documents</h2>
+              {data.purchaseRequest.documentUrl ? (
+                <a className="text-purple-300 underline" href={data.purchaseRequest.documentUrl} target="_blank" rel="noreferrer">
+                  View / Download document
+                </a>
+              ) : (
+                <div className="text-sm text-muted-foreground">No document uploaded</div>
+              )}
+            </Card>
+
+            <Card className="p-6 space-y-3">
+              <h2 className="text-lg font-medium">Exceptions</h2>
+              {data.exceptions.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No exceptions found.</div>
+              ) : (
+                <div className="space-y-2">
+                  {data.exceptions.map((ex) => (
+                    <div key={ex.id} className="rounded border border-white/10 px-3 py-2 text-sm">
+                      <div>Type: {ex.type}</div>
+                      <div>Status: {ex.status}</div>
+                      <div>Created: {new Date(ex.created_at).toLocaleString()}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            <Card className="p-6 space-y-3">
+              <h2 className="text-lg font-medium">Audit Logs</h2>
+              {data.auditLogs.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No audit logs found.</div>
+              ) : (
+                <div className="space-y-2">
+                  {data.auditLogs.map((log) => (
+                    <div key={log.id} className="rounded border border-white/10 px-3 py-2 text-sm">
+                      <div className="font-medium">{log.action}</div>
+                      <div className="text-muted-foreground">Time: {new Date(log.timestamp).toLocaleString()}</div>
+                      {log.reason ? <div className="text-muted-foreground">Reason: {log.reason}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            <Card className="p-6 space-y-3 border border-purple-500/30">
+              <h2 className="text-lg font-medium">Admin Override</h2>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant={overrideDecision === 'approved' ? 'success' : 'secondary'}
+                  onClick={() => setOverrideDecision('approved')}
+                >
+                  Approve
+                </Button>
+                <Button
+                  type="button"
+                  variant={overrideDecision === 'rejected' ? 'danger' : 'secondary'}
+                  onClick={() => setOverrideDecision('rejected')}
+                >
+                  Reject
+                </Button>
+              </div>
+              <textarea
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
+                rows={4}
+                placeholder="Reason (required)"
+              />
+              <Button
+                type="button"
+                variant={overrideDecision === 'approved' ? 'success' : 'danger'}
+                disabled={!overrideReason.trim() || overrideMutation.isPending}
+                onClick={() => overrideMutation.mutate()}
+              >
+                {overrideMutation.isPending ? 'Applying...' : 'Apply Override'}
+              </Button>
+            </Card>
+          </>
+        )}
+      </PageContainer>
+    </AppLayout>
+  );
+}
+

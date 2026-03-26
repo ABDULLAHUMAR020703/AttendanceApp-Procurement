@@ -360,3 +360,75 @@ export async function decideApproval(params: {
   return { prId: pr.id, status: 'approved' as const, approval: updatedApproval };
 }
 
+export async function adminOverridePurchaseRequest(params: {
+  requestId: string;
+  decision: ApprovalDecision;
+  reason: string;
+  actorUserId: string;
+}) {
+  const { requestId, decision, reason, actorUserId } = params;
+  const decisionNormalized = decision === 'approved' ? 'approved' : 'rejected';
+
+  const { data: pr, error: prErr } = await supabaseAdmin
+    .from('purchase_requests')
+    .select('id, status, created_by')
+    .eq('id', requestId)
+    .single();
+  if (prErr || !pr) throw prErr ?? new AppError('Purchase request not found', 404);
+
+  if (decisionNormalized === 'rejected') {
+    const { error: prRejErr } = await supabaseAdmin
+      .from('purchase_requests')
+      .update({ status: 'rejected' })
+      .eq('id', pr.id);
+    if (prRejErr) throw prRejErr;
+
+    const { error: approvalsCloseErr } = await supabaseAdmin
+      .from('approvals')
+      .update({
+        status: 'rejected',
+        comments: `Admin override rejected. Reason: ${reason}`,
+      })
+      .eq('request_id', pr.id)
+      .eq('status', 'pending');
+    if (approvalsCloseErr) throw approvalsCloseErr;
+  } else {
+    const { error: prOkErr } = await supabaseAdmin
+      .from('purchase_requests')
+      .update({ status: 'approved' })
+      .eq('id', pr.id);
+    if (prOkErr) throw prOkErr;
+
+    const { error: approvalsSkipErr } = await supabaseAdmin
+      .from('approvals')
+      .update({
+        status: 'approved',
+        comments: `Admin override approved. Reason: ${reason}`,
+      })
+      .eq('request_id', pr.id)
+      .eq('status', 'pending');
+    if (approvalsSkipErr) throw approvalsSkipErr;
+  }
+
+  const { data: updatedPr, error: updatedPrErr } = await supabaseAdmin
+    .from('purchase_requests')
+    .select('id, status, created_by')
+    .eq('id', pr.id)
+    .single();
+  if (updatedPrErr || !updatedPr) throw updatedPrErr ?? new AppError('Updated purchase request not found', 500);
+
+  await writeAuditLog({
+    action: 'admin_override',
+    userId: actorUserId,
+    entity: 'purchase_request',
+    entityId: pr.id,
+    reason,
+  });
+
+  return {
+    prId: updatedPr.id,
+    status: updatedPr.status,
+    reason,
+  };
+}
+
