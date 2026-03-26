@@ -182,15 +182,33 @@ export async function decideApproval(params: {
     if (!allApproved) throw new AppError('Cannot decide before previous stages are approved', 409);
   }
 
-  // Update current approval decision
-  const { error: updErr } = await supabaseAdmin
+  // Update current approval decision by request_id + approver_id from JWT.
+  // This avoids unreliable role-only matching across departments/users.
+  // eslint-disable-next-line no-console
+  console.log('[approvals] decision update attempt', {
+    request_id: approval.request_id,
+    current_user_id: actorUserId,
+  });
+  const { data: updatedApprovals, error: updErr } = await supabaseAdmin
     .from('approvals')
     .update({
       status: decisionNormalized,
       comments: comments ?? null,
     })
-    .eq('id', approvalId);
+    .eq('request_id', approval.request_id)
+    .eq('approver_id', actorUserId)
+    .eq('status', 'pending')
+    .select('id, request_id, approver_id, role, status, comments, created_at');
   if (updErr) throw updErr;
+  const rowsAffected = updatedApprovals?.length ?? 0;
+  // eslint-disable-next-line no-console
+  console.log('[approvals] decision update result', {
+    request_id: approval.request_id,
+    current_user_id: actorUserId,
+    rows_affected: rowsAffected,
+  });
+  if (rowsAffected === 0) throw new AppError('No matching approval found for this user', 404);
+  const updatedApproval = updatedApprovals![0];
 
   if (decisionNormalized === 'rejected') {
     // Reject the whole PR and close the workflow.
@@ -221,7 +239,7 @@ export async function decideApproval(params: {
       entityId: pr.id,
     });
 
-    return { prId: pr.id, status: 'rejected' as const };
+    return { prId: pr.id, status: 'rejected' as const, approval: updatedApproval };
   }
 
   // Decision is approved
@@ -253,7 +271,7 @@ export async function decideApproval(params: {
       entityId: pr.id,
     });
 
-    return { prId: pr.id, status: 'pending' as const };
+    return { prId: pr.id, status: 'pending' as const, approval: updatedApproval };
   }
 
   // Apply financial validation: decrement remaining value / budget only if sufficient.
@@ -339,6 +357,6 @@ export async function decideApproval(params: {
     entityId: pr.id,
   });
 
-  return { prId: pr.id, status: 'approved' as const };
+  return { prId: pr.id, status: 'approved' as const, approval: updatedApproval };
 }
 
