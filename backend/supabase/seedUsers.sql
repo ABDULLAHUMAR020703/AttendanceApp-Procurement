@@ -4,12 +4,10 @@
 
 create extension if not exists pgcrypto;
 
--- Role mapping (existing and new users):
+-- Role mapping (legacy meta roles in auth metadata):
 -- super_admin -> admin
 -- manager -> pm
--- employee -> team_lead
---
--- Align users.role constraint with procurement workflow roles.
+-- employee -> employee
 alter table public.users
 drop constraint if exists users_role_check;
 
@@ -17,24 +15,30 @@ update public.users
 set role = case
   when role = 'super_admin' then 'admin'
   when role = 'manager' then 'pm'
-  when role = 'employee' then 'team_lead'
+  when role in ('team_lead', 'finance') then 'employee'
+  when role in ('dept_head', 'gm') then 'pm'
   else role
 end
-where role in ('super_admin', 'manager', 'employee');
+where role in ('super_admin', 'manager', 'team_lead', 'finance', 'dept_head', 'gm');
+
+update public.users set department = coalesce(nullif(trim(department), ''), 'technical') where department is null;
+update public.users set department = 'management' where role = 'admin';
+update public.users set department = 'finance' where email ilike '%.batt@hadir.ai' and role = 'employee';
 
 alter table public.users
 add constraint users_role_check
-check (role in ('admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm'));
+check (role in ('admin', 'pm', 'employee'));
 
 do $$
 declare
   allowed_roles text[] := array['super_admin', 'manager', 'employee'];
-  allowed_mapped_roles text[] := array['admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm'];
+  allowed_mapped_roles text[] := array['admin', 'pm', 'employee'];
   rec record;
   v_email text;
   v_full_name text;
   v_mapped_role text;
   v_user_id uuid;
+  v_department text;
 begin
   for rec in
     select *
@@ -62,8 +66,14 @@ begin
     v_mapped_role := case
       when rec.role = 'super_admin' then 'admin'
       when rec.role = 'manager' then 'pm'
-      when rec.role = 'employee' then 'team_lead'
+      when rec.role = 'employee' then 'employee'
       else rec.role
+    end;
+
+    v_department := case
+      when v_mapped_role = 'admin' then 'management'
+      when rec.username = 'abdul.rehman.batt' then 'finance'
+      else 'technical'
     end;
 
     if not (v_mapped_role = any(allowed_mapped_roles)) then
@@ -71,7 +81,6 @@ begin
       continue;
     end if;
 
-    -- 1) Ensure auth user exists
     select id into v_user_id
     from auth.users
     where lower(email) = lower(v_email)
@@ -109,13 +118,14 @@ begin
       raise notice '[AUTH EXISTS] % -> %', rec.username, v_email;
     end if;
 
-    -- 2) Insert/skip profile in users table with the same id
-    -- Current schema uses: id, name, email, role, department, created_at
-    insert into public.users (id, name, email, role, created_at)
-    values (v_user_id, v_full_name, v_email, v_mapped_role, now())
-    on conflict (id) do nothing;
+    insert into public.users (id, name, email, role, department, created_at)
+    values (v_user_id, v_full_name, v_email, v_mapped_role, v_department, now())
+    on conflict (id) do update set
+      name = excluded.name,
+      email = excluded.email,
+      role = excluded.role,
+      department = excluded.department;
 
     raise notice '[USERS UPSERTED] % (id=%)', rec.username, v_user_id;
   end loop;
 end $$;
-

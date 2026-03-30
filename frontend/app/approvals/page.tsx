@@ -12,6 +12,7 @@ import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/
 import { useAuth } from '../../features/auth/AuthProvider';
 import { authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 import { useState } from 'react';
+import { APPROVAL_STAGE_ORDER, approvalStageLabel, approvalPipelineStatus } from '../../lib/org';
 
 type Approval = {
   id: string;
@@ -23,10 +24,8 @@ type Approval = {
   created_at: string;
 };
 
-const APPROVAL_ORDER = ['team_lead', 'pm', 'finance', 'gm'] as const;
-
 function orderIndex(role: string) {
-  const idx = APPROVAL_ORDER.indexOf(role as (typeof APPROVAL_ORDER)[number]);
+  const idx = APPROVAL_STAGE_ORDER.indexOf(role as (typeof APPROVAL_STAGE_ORDER)[number]);
   return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
 }
 
@@ -172,8 +171,7 @@ export default function ApprovalsPage() {
                 {(() => {
                   const chain = approvalsByRequest?.[a.request_id] ?? [a];
                   const currentStep = chain.find((step) => step.status === 'pending');
-                  const isCurrentRole = !!currentStep && profile?.role === currentStep.role;
-                  const canDecide = a.status === 'pending' && isCurrentRole;
+                  const canDecide = a.status === 'pending' && !!currentStep && currentStep.id === a.id;
 
                   return (
                     <>
@@ -186,13 +184,15 @@ export default function ApprovalsPage() {
                             return (
                               <span key={step.id} className="inline-flex items-center gap-1 rounded border border-white/10 px-2 py-1">
                                 <span>{indicator}</span>
-                                <span>{step.role}</span>
+                                <span title={step.role}>{approvalStageLabel(step.role)}</span>
                               </span>
                             );
                           })}
                         </div>
                         {!canDecide && currentStep ? (
-                          <div className="mt-2 text-xs text-amber-200">Pending {currentStep.role} approval</div>
+                          <div className="mt-2 text-xs text-amber-200">
+                            {approvalPipelineStatus(currentStep.role, currentStep.status)}
+                          </div>
                         ) : null}
                       </div>
 
@@ -208,7 +208,7 @@ export default function ApprovalsPage() {
                               a.request_id
                             )}
                           </div>
-                          <div className="text-sm text-muted-foreground">Stage role: {a.role}</div>
+                          <div className="text-sm text-muted-foreground">Stage: {approvalStageLabel(a.role)}</div>
                           <div className="text-sm text-muted-foreground">Status: {a.status}</div>
                         </div>
                         {isAdmin ? (

@@ -5,16 +5,21 @@ import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { useQueryClient } from '@tanstack/react-query';
 import { getBrowserSupabase } from '../../lib/supabase-browser';
 
-export type UserRole =
-  | 'super_admin'
-  | 'manager'
-  | 'employee'
-  | 'admin'
-  | 'pm'
-  | 'team_lead'
+export type UserRole = 'admin' | 'pm' | 'employee';
+
+export type Department =
+  | 'sales'
+  | 'hr'
+  | 'technical'
   | 'finance'
-  | 'dept_head'
-  | 'gm';
+  | 'engineering'
+  | 'management'
+  | 'ibs'
+  | 'power'
+  | 'civil_works'
+  | 'bss_wireless'
+  | 'fixed_network'
+  | 'warehouse';
 
 export type UserProfile = {
   userId: string;
@@ -74,8 +79,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error('Failed to fetch profile from backend');
-    const json = (await res.json()) as { user: UserProfile };
-    setProfile(json.user);
+    const json = (await res.json()) as {
+      user: { userId: string; role: UserRole; department?: string | null; name?: string | null; email?: string | null };
+    };
+
+    const raw = json.user as Record<string, unknown>;
+    const userId = (raw.userId ?? raw.user_id) as string;
+
+    setProfile({
+      userId,
+      role: json.user.role as UserRole,
+      department: json.user.department ?? null,
+      name: json.user.name ?? null,
+      email: json.user.email ?? null,
+    });
   };
 
   useEffect(() => {
@@ -115,9 +132,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setProfile(null);
       return;
     }
-    // Refresh role/profile after auth state changes.
     refreshProfile().catch(() => {
-      // Keep UI functional even if RBAC mapping is incomplete.
       setProfile(null);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -150,4 +165,3 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
-

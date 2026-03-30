@@ -134,7 +134,7 @@ poRouter.post('/upload', requireRole('admin'), upload.single('file'), async (req
   }
 });
 
-poRouter.get('/', requireRole('admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm'), async (_req, res) => {
+poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (_req, res) => {
   const { data, error } = await supabaseAdmin
     .from('purchase_orders')
     .select('id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at')

@@ -15,7 +15,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 
 
 purchaseRequestsRouter.post(
   '/',
-  requireRole('admin', 'pm', 'team_lead'),
+  requireRole('admin', 'pm', 'employee'),
   upload.single('document'),
   async (req, res, next) => {
     try {
@@ -40,6 +40,7 @@ purchaseRequestsRouter.post(
             }
           : null,
         createdBy: req.auth!.userId,
+        actorRole: req.auth!.role,
         actorDepartment,
       });
 
@@ -52,7 +53,7 @@ purchaseRequestsRouter.post(
 
 purchaseRequestsRouter.get(
   '/',
-  requireRole('admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm'),
+  requireRole('admin', 'pm', 'employee'),
   async (req, res, next) => {
     try {
       const userId = req.auth!.userId;
@@ -138,7 +139,7 @@ purchaseRequestsRouter.get(
         pr.project_id
           ? supabaseAdmin
               .from('projects')
-              .select('id, name, po_id, budget, status, is_exception, created_by, created_at')
+              .select('id, name, po_id, budget, status, is_exception, created_by, created_at, department, team_lead_id')
               .eq('id', pr.project_id)
               .maybeSingle()
           : Promise.resolve({ data: null, error: null }),

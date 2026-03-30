@@ -68,7 +68,7 @@ export default function PoUploadPage() {
           subtitle="Upload a CSV/XLSX with columns: po_number, vendor, total_value."
         />
 
-        {role !== 'admin' && role !== 'super_admin' ? (
+        {role !== 'admin' ? (
           <Card className="p-4 text-sm text-rose-300">
             Only admins can upload purchase orders.
           </Card>

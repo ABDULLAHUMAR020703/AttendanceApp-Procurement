@@ -4,6 +4,7 @@ import { AppError } from '../../utils/errors';
 import { startApprovalsForPurchaseRequest } from '../approvals/engine';
 import { writeAuditLog } from '../auditLogs/service';
 import { createInAppNotification, enqueueEmailPlaceholder, getUserEmail } from '../notifications/service';
+import type { UserRole } from '../auth/types';
 
 async function notifyUser(params: { userId: string; type: string; message: string; emailSubject: string }) {
   await createInAppNotification({ userId: params.userId, type: params.type, message: params.message });
@@ -19,9 +20,10 @@ export async function createPurchaseRequest(params: {
   amount: number;
   documentFile?: { buffer: Buffer; originalName: string; mimeType: string } | null;
   createdBy: string;
+  actorRole: UserRole;
   actorDepartment?: string | null;
 }) {
-  const { projectId, description, amount, documentFile, createdBy } = params;
+  const { projectId, description, amount, documentFile, createdBy, actorRole, actorDepartment } = params;
 
   if (!description.trim()) throw new AppError('Description is required', 400);
   if (description.trim().length < 10) throw new AppError('Description must be at least 10 characters', 400);
@@ -29,10 +31,16 @@ export async function createPurchaseRequest(params: {
 
   const { data: project, error: prjErr } = await supabaseAdmin
     .from('projects')
-    .select('id, po_id, budget, status, created_by')
+    .select('id, po_id, budget, status, created_by, department')
     .eq('id', projectId)
     .single();
   if (prjErr || !project) throw prjErr ?? new AppError('Project not found', 404);
+
+  if (actorRole !== 'admin') {
+    if (!actorDepartment || actorDepartment !== project.department) {
+      throw new AppError('Purchase requests can only be submitted for projects in your department', 403);
+    }
+  }
 
   if (project.status !== 'active') {
     throw new AppError(`Project is not active (status=${project.status}). Submit is blocked until exceptions are approved.`, 409);

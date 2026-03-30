@@ -12,24 +12,25 @@ const navItems = [
   {
     href: '/dashboard',
     label: 'Dashboard',
-    roles: ['super_admin', 'manager', 'employee', 'admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm'],
+    roles: ['employee', 'admin', 'pm'],
   },
-  { href: '/po/upload', label: 'PO Upload', roles: ['super_admin', 'admin'] },
+  { href: '/po/upload', label: 'PO Upload', roles: ['admin'] },
   {
     href: '/projects',
     label: 'Projects',
-    roles: ['super_admin', 'manager', 'employee', 'admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm'],
+    roles: ['employee', 'admin', 'pm'],
   },
   {
     href: '/purchase-requests',
     label: 'Purchase Requests',
-    roles: ['super_admin', 'manager', 'employee', 'admin', 'pm', 'team_lead', 'finance', 'dept_head', 'gm'],
+    roles: ['employee', 'admin', 'pm'],
   },
   {
     href: '/approvals',
     label: 'Approvals',
-    roles: ['super_admin', 'manager', 'admin', 'team_lead', 'pm', 'finance', 'gm'],
+    roles: ['employee', 'admin', 'pm'],
   },
+  { href: '/admin/users', label: 'Admin: Users', roles: ['admin'] },
 ];
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -38,7 +39,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
   const role = profile?.role;
-  const items = useMemo(() => navItems.filter((n) => (role ? n.roles.includes(role as any) : false)), [role]);
+  const items = useMemo(() => navItems.filter((n) => (role ? n.roles.includes(role) : false)), [role]);
 
   return (
     <div className="min-h-screen flex text-slate-200 font-sans relative overflow-hidden bg-transparent">
@@ -62,8 +63,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               href={i.href}
               className={cn(
                 'block rounded-xl px-4 py-3 text-sm border border-transparent transition-all font-medium tracking-wide',
-                pathname === i.href 
-                  ? 'bg-purple-600/20 border-purple-500/30 text-white shadow-[0_0_15px_rgba(147,51,234,0.15)]' 
+                pathname === i.href
+                  ? 'bg-purple-600/20 border-purple-500/30 text-white shadow-[0_0_15px_rgba(147,51,234,0.15)]'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-white/5 hover:border-slate-800/50',
               )}
             >
@@ -78,6 +79,9 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               <div className="truncate">
                 <div className="font-bold tracking-wider text-slate-200 mb-1">{profile.name ?? profile.email ?? 'User'}</div>
                 <div className="text-[10px] tracking-widest uppercase text-purple-400">{profile.role}</div>
+                {profile.department ? (
+                  <div className="text-[10px] tracking-wider text-slate-500 uppercase mt-0.5">{profile.department}</div>
+                ) : null}
               </div>
               <Button
                 className="w-full bg-[#6d28d9]/20 hover:bg-[#6d28d9]/40 border border-purple-500/30 text-purple-200 transition-colors py-2 rounded-lg font-bold tracking-wider text-[10px] uppercase"
@@ -97,9 +101,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="flex-1 min-w-0 z-10 relative">
-        <div className="p-8">
-          {children}
-        </div>
+        <div className="p-8">{children}</div>
       </main>
     </div>
   );

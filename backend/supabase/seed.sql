@@ -1,5 +1,5 @@
 -- Seed procurement workflow data using the real users created in `seedUsers.sql`.
--- This script is safe to re-run (idempotent) because every record insert uses `on conflict (id) do nothing`.
+-- Safe to re-run (idempotent) where inserts use `on conflict (id) do nothing`.
 
 -- PURCHASE ORDER
 insert into public.purchase_orders (id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at) values
@@ -14,13 +14,17 @@ insert into public.purchase_orders (id, po_number, vendor, total_value, remainin
   )
 on conflict (id) do nothing;
 
--- PROJECTS
-insert into public.projects (id, name, po_id, budget, created_by, status, is_exception, created_at) values
+-- PROJECTS (department + optional team_lead_id)
+insert into public.projects (
+  id, name, po_id, budget, department, team_lead_id, created_by, status, is_exception, created_at
+) values
   (
     'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
     'Project Alpha',
     'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
     50000.00,
+    'technical',
+    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'employee' limit 1),
     (select id from public.users where email = 'abdullah.bin.ali@hadir.ai' and role = 'pm' limit 1),
     'active',
     false,
@@ -31,7 +35,9 @@ insert into public.projects (id, name, po_id, budget, created_by, status, is_exc
     'Project NoPO',
     null,
     30000.00,
-    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'team_lead' limit 1),
+    'technical',
+    null,
+    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'employee' limit 1),
     'exception_pending',
     true,
     now()
@@ -52,7 +58,7 @@ insert into public.purchase_requests (id, project_id, description, amount, docum
     15000.00,
     null,
     'pending',
-    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'team_lead' limit 1),
+    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'employee' limit 1),
     now()
   ),
   (
@@ -62,17 +68,17 @@ insert into public.purchase_requests (id, project_id, description, amount, docum
     60000.00,
     null,
     'pending_exception',
-    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'team_lead' limit 1),
+    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'employee' limit 1),
     now()
   )
 on conflict (id) do nothing;
 
--- APPROVALS (for PR #1 only; PR #2 is paused by over_budget exception)
+-- APPROVALS (team_lead → pm → admin)
 insert into public.approvals (id, request_id, approver_id, role, status, comments, created_at, updated_at) values
   (
     '12121212-1212-1212-1212-121212121212',
     'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
-    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'team_lead' limit 1),
+    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'employee' limit 1),
     'team_lead',
     'pending',
     null,
@@ -92,8 +98,8 @@ insert into public.approvals (id, request_id, approver_id, role, status, comment
   (
     '14141414-1414-1414-1414-141414141414',
     'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
-    (select id from public.users where email = 'abdul.rehman.batt@hadir.ai' and role = 'finance' limit 1),
-    'finance',
+    (select id from public.users where email = 'hammad.bakhtiar@hadir.ai' and role = 'admin' limit 1),
+    'admin',
     'pending',
     null,
     now(),
@@ -105,11 +111,10 @@ on conflict (id) do nothing;
 insert into public.notifications (id, user_id, type, message, is_read, created_at) values
   (
     '16161616-1616-1616-1616-161616161616',
-    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'team_lead' limit 1),
+    (select id from public.users where email = 'hasnain.ibrar@hadir.ai' and role = 'employee' limit 1),
     'pr_created',
     'PR created for Project Alpha',
     false,
     now()
   )
 on conflict (id) do nothing;
-

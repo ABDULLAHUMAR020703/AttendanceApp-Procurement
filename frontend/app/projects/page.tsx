@@ -24,6 +24,8 @@ type Project = {
   is_exception: boolean;
   created_at: string;
   created_by: string;
+  department: string;
+  team_lead_id: string | null;
   /** Populated by GET /projects when project is linked to a PO (additive field). */
   purchase_order?: ProjectPurchaseOrderSnapshot | ProjectPurchaseOrderSnapshot[] | null;
 };
@@ -53,11 +55,21 @@ function linkedPurchaseOrder(p: Project): ProjectPurchaseOrderSnapshot | null {
 
 function canArchiveProject(
   p: Project,
-  profile: { userId: string; role: string } | null,
+  profile: { userId: string; role: string; department?: string | null } | null,
 ): boolean {
   if (!profile) return false;
-  if (profile.role === 'admin' || profile.role === 'super_admin') return true;
-  if (profile.role === 'pm') return p.created_by === profile.userId;
+  if (profile.role === 'admin') return true;
+  if (profile.role === 'pm') return !!(profile.department && profile.department === p.department);
+  return false;
+}
+
+function canAssignTeamLead(
+  profile: { role: string; department?: string | null } | null,
+  p: Project,
+): boolean {
+  if (!profile) return false;
+  if (profile.role === 'admin') return true;
+  if (profile.role === 'pm') return !!(profile.department && profile.department === p.department);
   return false;
 }
 
@@ -80,16 +92,23 @@ function BudgetUsageBar({ total, remaining }: { total: number; remaining: number
 }
 
 /** Matches backend GET /api/po allowed roles (shared PO list for procurement roles). */
-const ROLES_WITH_PO_LIST = new Set<string>([
-  'admin',
-  'super_admin',
-  'pm',
-  'manager',
-  'team_lead',
+const ROLES_WITH_PO_LIST = new Set<string>(['admin', 'pm', 'employee']);
+
+const DEPARTMENTS = [
+  'sales',
+  'hr',
+  'technical',
   'finance',
-  'dept_head',
-  'gm',
-]);
+  'engineering',
+  'ibs',
+  'power',
+  'civil_works',
+  'bss_wireless',
+  'fixed_network',
+  'warehouse',
+] as const;
+
+type UserRow = { id: string; name: string; email: string; role: string; department: string | null };
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -132,17 +151,27 @@ export default function ProjectsPage() {
     },
   });
 
-  const canCreate =
-    profile?.role === 'super_admin' ||
-    profile?.role === 'manager' ||
-    profile?.role === 'admin' ||
-    profile?.role === 'pm' ||
-    profile?.role === 'team_lead';
+  const { data: deptUsersData } = useQuery({
+    queryKey: ['users', 'team-lead-pool', profile?.role],
+    enabled: !!token && !!supabase && (profile?.role === 'pm' || profile?.role === 'admin'),
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ users: UserRow[] }>(supabase, '/api/users');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+  });
+
+  const canCreate = profile?.role === 'admin' || profile?.role === 'pm';
 
   const [name, setName] = useState('');
   const [poId, setPoId] = useState<string>('');
   const [noPoMode, setNoPoMode] = useState(false);
   const [budget, setBudget] = useState<number>(0);
+  const [department, setDepartment] = useState<string>('technical');
+  const [createTeamLeadId, setCreateTeamLeadId] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
@@ -174,7 +203,13 @@ export default function ProjectsPage() {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const payload: any = { name };
+      const payload: Record<string, unknown> = { name };
+      if (profile?.role === 'admin') {
+        payload.department = department;
+      }
+      if (createTeamLeadId) {
+        payload.team_lead_id = createTeamLeadId;
+      }
       if (noPoMode) {
         payload.po_id = null;
         payload.budget = Number(budget);
@@ -198,13 +233,37 @@ export default function ProjectsPage() {
       setPoId('');
       setNoPoMode(false);
       setBudget(0);
+      setCreateTeamLeadId('');
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     },
     onError: (err: any) => setError(err?.message ?? 'Create failed'),
   });
 
+  const teamLeadMutation = useMutation({
+    mutationFn: async (params: { projectId: string; team_lead_id: string | null }) => {
+      try {
+        return await authedFetchWithSupabase<unknown>(supabase, `/api/projects/${params.projectId}/team-lead`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team_lead_id: params.team_lead_id }),
+        });
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    },
+  });
+
   const poOptions = useMemo(() => poData?.purchaseOrders ?? [], [poData]);
+
+  const teamLeadCandidatesForDept = (dept: string) =>
+    (deptUsersData?.users ?? []).filter(
+      (u) => u.department === dept && u.role !== 'admin',
+    );
 
   return (
     <AppLayout>
@@ -236,6 +295,49 @@ export default function ProjectsPage() {
                   onChange={(e) => setName(e.target.value)}
                   required
                 />
+              </div>
+
+              {profile?.role === 'admin' ? (
+                <div className="md:col-span-2 space-y-2">
+                  <label className="block text-sm font-medium">Department</label>
+                  <select
+                    className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
+                    value={department}
+                    onChange={(e) => {
+                      setDepartment(e.target.value);
+                      setCreateTeamLeadId('');
+                    }}
+                  >
+                    {DEPARTMENTS.map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="text-xs text-muted-foreground">Admin assigns the operational department for this project.</div>
+                </div>
+              ) : (
+                <div className="md:col-span-2 text-xs text-muted-foreground">
+                  New projects are created in your department: <span className="text-foreground">{profile?.department}</span>
+                </div>
+              )}
+
+              <div className="md:col-span-2 space-y-2">
+                <label className="block text-sm font-medium">Team lead (optional)</label>
+                <select
+                  className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
+                  value={createTeamLeadId}
+                  onChange={(e) => setCreateTeamLeadId(e.target.value)}
+                >
+                  <option value="">None — PM approval is first step</option>
+                  {(profile?.role === 'admin' ? teamLeadCandidatesForDept(department) : teamLeadCandidatesForDept(profile?.department ?? '')).map(
+                    (u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name} ({u.role})
+                      </option>
+                    ),
+                  )}
+                </select>
               </div>
 
               <div className="md:col-span-2 flex items-center gap-3">
@@ -311,6 +413,8 @@ export default function ProjectsPage() {
                 <THead>
                   <TR>
                     <TH>Project</TH>
+                    <TH>Dept</TH>
+                    <TH>Team lead</TH>
                     <TH>Status</TH>
                     <TH>Budget & usage</TH>
                     <TH>PO</TH>
@@ -333,6 +437,29 @@ export default function ProjectsPage() {
                               <div>Remaining budget: {formatPkr(remaining!)}</div>
                             </div>
                           ) : null}
+                        </TD>
+                        <TD className="text-sm capitalize">{p.department}</TD>
+                        <TD className="min-w-[180px]">
+                          {canAssignTeamLead(profile, p) ? (
+                            <select
+                              className="w-full max-w-[200px] rounded-lg border border-white/10 bg-[#2a2640] px-2 py-1 text-xs outline-none"
+                              value={p.team_lead_id ?? ''}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                teamLeadMutation.mutate({ projectId: p.id, team_lead_id: v || null });
+                              }}
+                              disabled={teamLeadMutation.isPending}
+                            >
+                              <option value="">None</option>
+                              {teamLeadCandidatesForDept(p.department).map((u) => (
+                                <option key={u.id} value={u.id}>
+                                  {u.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">{p.team_lead_id ? p.team_lead_id.slice(0, 8) + '…' : '—'}</span>
+                          )}
                         </TD>
                         <TD>{p.is_exception ? `${p.status} (exception)` : p.status}</TD>
                         <TD>

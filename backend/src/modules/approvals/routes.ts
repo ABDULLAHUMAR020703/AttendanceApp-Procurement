@@ -19,7 +19,7 @@ const OverrideSchema = z.object({
   reason: z.string().min(1).max(2000),
 });
 
-approvalsRouter.get('/', requireRole('admin', 'team_lead', 'pm', 'finance', 'gm'), async (req, res, next) => {
+approvalsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res, next) => {
   try {
     const userId = req.auth!.userId;
     const role = req.auth!.role;
@@ -58,7 +58,7 @@ approvalsRouter.post(
 
 approvalsRouter.post(
   '/:id/decision',
-  requireRole('admin', 'team_lead', 'pm', 'finance', 'gm'),
+  requireRole('admin', 'pm', 'employee'),
   async (req, res, next) => {
     try {
       const approvalId = req.params.id as string;
