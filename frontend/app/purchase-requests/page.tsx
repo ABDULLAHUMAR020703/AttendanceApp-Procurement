@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { AppLayout } from '../../components/AppLayout';
@@ -10,6 +10,8 @@ import { Card } from '../../components/ui/Card';
 import { Input } from '../../components/ui/Input';
 import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
+import { PoLineTypeahead, type PoSearchLine } from '../../components/PoLineTypeahead';
+import { PrPoLineMetricsCells, type PoLineSummary } from '../../components/PrPoLineMetricsCells';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
 import { ApiError, authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../lib/api';
@@ -24,7 +26,50 @@ type Project = {
   budget: number;
   purchase_order?: ProjectPurchaseOrderSnapshot | ProjectPurchaseOrderSnapshot[] | null;
 };
-type PurchaseRequest = { id: string; project_id: string; description: string; amount: number; document_url: string | null; status: string; created_at: string; created_by: string };
+type PurchaseRequest = {
+  id: string;
+  project_id: string;
+  description: string;
+  amount: number;
+  document_url: string | null;
+  item_code?: string | null;
+  duplicate_count?: number | null;
+  po_line_id?: string | null;
+  requested_quantity?: number | null;
+  po_line_summary?: PoLineSummary | null;
+  status: string;
+  created_at: string;
+  created_by: string;
+};
+
+function ordinalTimeWord(occurrence: number): string {
+  const specials: Record<number, string> = {
+    2: 'second',
+    3: 'third',
+    4: 'fourth',
+    5: 'fifth',
+    6: 'sixth',
+    7: 'seventh',
+    8: 'eighth',
+    9: 'ninth',
+    10: 'tenth',
+    11: 'eleventh',
+    12: 'twelfth',
+  };
+  if (specials[occurrence]) return specials[occurrence]!;
+  const mod100 = occurrence % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${occurrence}th`;
+  switch (occurrence % 10) {
+    case 1:
+      return `${occurrence}st`;
+    case 2:
+      return `${occurrence}nd`;
+    case 3:
+      return `${occurrence}rd`;
+    default:
+      return `${occurrence}th`;
+  }
+}
 
 function linkedPurchaseOrder(p: Project | undefined): ProjectPurchaseOrderSnapshot | null {
   if (!p) return null;
@@ -56,6 +101,10 @@ export default function PurchaseRequestsPage() {
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState<number>(0);
   const [document, setDocument] = useState<File | null>(null);
+  const [selectedPoLine, setSelectedPoLine] = useState<PoSearchLine | null>(null);
+  const [fallbackItemCode, setFallbackItemCode] = useState('');
+  const [requestedQty, setRequestedQty] = useState<string>('');
+  const [duplicateModalOpen, setDuplicateModalOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [overrideTarget, setOverrideTarget] = useState<string | null>(null);
   const [overrideDecision, setOverrideDecision] = useState<'approved' | 'rejected'>('approved');
@@ -96,10 +145,98 @@ export default function PurchaseRequestsPage() {
   const selectedProject = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
   const selectedPo = useMemo(() => linkedPurchaseOrder(selectedProject), [selectedProject]);
   const availableBudget = useMemo(() => availableBudgetForProject(selectedProject), [selectedProject]);
-  const isOverBudget =
-    availableBudget != null && Number.isFinite(amount) && amount > 0 && amount > availableBudget;
+  const hasProjectPo = Boolean(selectedProject?.po_id);
+  const duplicateItemKey = (
+    selectedPoLine?.item_code?.trim().toLowerCase() ||
+    fallbackItemCode.trim().toLowerCase() ||
+    ''
+  ).trim();
+
+  const lineDrivesAmount = Boolean(
+    selectedPoLine != null && Number.isFinite(Number(selectedPoLine.unit_price)) && Number(selectedPoLine.unit_price) > 0,
+  );
+
+  const qtyNum = useMemo(() => {
+    const q = Number(String(requestedQty).trim());
+    return Number.isFinite(q) && q > 0 ? q : 0;
+  }, [requestedQty]);
+
+  const computedAmount = useMemo(() => {
+    if (!lineDrivesAmount || !selectedPoLine || qtyNum <= 0) return null;
+    const up = Number(selectedPoLine.unit_price);
+    if (!(up > 0)) return null;
+    return Math.round(qtyNum * up * 100) / 100;
+  }, [lineDrivesAmount, selectedPoLine, qtyNum]);
+
+  /** Amount used for validation, submission, and PO line checks (backend recomputes when line + qty). */
+  const effectiveAmount = useMemo(() => {
+    if (!hasProjectPo) {
+      return Number.isFinite(amount) && amount > 0 ? amount : 0;
+    }
+    if (!selectedPoLine) return 0;
+    if (lineDrivesAmount) {
+      return computedAmount != null && computedAmount > 0 ? computedAmount : 0;
+    }
+    return Number.isFinite(amount) && amount > 0 ? amount : 0;
+  }, [hasProjectPo, selectedPoLine, lineDrivesAmount, computedAmount, amount]);
+
+  const isOverBudgetNoPo =
+    !hasProjectPo &&
+    availableBudget != null &&
+    Number.isFinite(amount) &&
+    amount > 0 &&
+    amount > availableBudget;
+
+  const exceedsLineBudget =
+    hasProjectPo &&
+    selectedPoLine != null &&
+    effectiveAmount > 0 &&
+    effectiveAmount > selectedPoLine.effective_remaining;
+
   const descriptionTrimmed = description.trim();
   const descriptionInvalid = descriptionTrimmed.length < 10;
+
+  const { data: duplicateCountData } = useQuery({
+    queryKey: ['purchase-requests', 'duplicate-count', duplicateItemKey],
+    enabled: !!token && !!supabase && duplicateItemKey.length > 0,
+    queryFn: async () => {
+      try {
+        const params = new URLSearchParams({ item_code: duplicateItemKey });
+        return await authedFetchWithSupabase<{ previousCount: number }>(
+          supabase!,
+          `/api/purchase-requests/item-duplicate-count?${params.toString()}`,
+        );
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+  });
+
+  const previousSameItemCount = duplicateCountData?.previousCount ?? 0;
+  const nextOccurrence = previousSameItemCount + 1;
+  const showDuplicateHighlight = duplicateItemKey.length > 0 && previousSameItemCount >= 1;
+  const duplicateBorderClass = !showDuplicateHighlight
+    ? undefined
+    : previousSameItemCount >= 3
+      ? 'border-red-500'
+      : previousSameItemCount >= 2
+        ? 'border-orange-500'
+        : 'border-amber-400';
+
+  useEffect(() => {
+    setDuplicateModalOpen(false);
+  }, [duplicateItemKey]);
+
+  useEffect(() => {
+    setSelectedPoLine(null);
+    setFallbackItemCode('');
+    setRequestedQty('');
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!selectedPoLine) setRequestedQty('');
+  }, [selectedPoLine]);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -107,7 +244,7 @@ export default function PurchaseRequestsPage() {
       if (!projectId) throw new Error('Select a project');
       if (!description.trim()) throw new Error('Description is required');
       if (description.trim().length < 10) throw new Error('Description must be at least 10 characters');
-      if (!amount || amount <= 0) throw new Error('Amount must be > 0');
+      if (!effectiveAmount || effectiveAmount <= 0) throw new Error('Amount must be > 0');
 
       const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
       let bearer: string;
@@ -120,7 +257,15 @@ export default function PurchaseRequestsPage() {
       const fd = new FormData();
       fd.append('project_id', projectId);
       fd.append('description', description);
-      fd.append('amount', String(amount));
+      fd.append('amount', String(effectiveAmount));
+      if (selectedPoLine) {
+        fd.append('po_line_sn', selectedPoLine.po_line_sn);
+      } else if (fallbackItemCode.trim()) {
+        fd.append('item_code', fallbackItemCode.trim());
+      }
+      if (selectedPoLine && lineDrivesAmount && qtyNum > 0) {
+        fd.append('requested_quantity', String(qtyNum));
+      }
       if (document) fd.append('document', document);
 
       const res = await fetch(`${apiBase}/api/purchase-requests`, {
@@ -149,6 +294,9 @@ export default function PurchaseRequestsPage() {
       setDescription('');
       setAmount(0);
       setDocument(null);
+      setSelectedPoLine(null);
+      setFallbackItemCode('');
+      setRequestedQty('');
     },
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'PR creation failed'),
   });
@@ -200,6 +348,28 @@ export default function PurchaseRequestsPage() {
                 setError('Description is required');
                 return;
               }
+              if (!projectId) {
+                setError('Select a project');
+                return;
+              }
+              if (!effectiveAmount || effectiveAmount <= 0) {
+                setError(
+                  hasProjectPo && selectedPoLine && lineDrivesAmount
+                    ? 'Enter a valid quantity (amount is calculated from unit price)'
+                    : 'Amount must be greater than 0',
+                );
+                return;
+              }
+              if (hasProjectPo && !selectedPoLine) {
+                setError('Select an item / PO line for this project');
+                return;
+              }
+              if (isOverBudgetNoPo) return;
+              if (hasProjectPo && exceedsLineBudget) return;
+              if (duplicateItemKey && previousSameItemCount >= 1) {
+                setDuplicateModalOpen(true);
+                return;
+              }
               mutation.mutate();
             }}
           >
@@ -239,6 +409,113 @@ export default function PurchaseRequestsPage() {
               ) : null}
             </div>
 
+            {hasProjectPo ? (
+              <div className={`md:col-span-2 space-y-2 rounded-lg border border-white/10 bg-[#2a1820]/20 p-3 ${duplicateBorderClass ?? ''}`}>
+                <label className="block text-sm font-medium">Select Item / PO Line</label>
+                <PoLineTypeahead
+                  projectId={projectId}
+                  enabled={hasProjectPo && !!projectId}
+                  supabase={supabase}
+                  token={token}
+                  selectedLine={selectedPoLine}
+                  onSelectLine={(line) => {
+                    setSelectedPoLine(line);
+                    if (line?.description && description.trim().length < 10) {
+                      setDescription(line.description);
+                    }
+                  }}
+                />
+                {showDuplicateHighlight ? (
+                  <p className="text-sm text-amber-200/90">
+                    You have already submitted {previousSameItemCount}{' '}
+                    {previousSameItemCount === 1 ? 'request' : 'requests'} for this item code.
+                  </p>
+                ) : null}
+                {hasProjectPo && selectedPoLine && exceedsLineBudget ? (
+                  <p className="text-sm font-medium text-rose-300">Exceeds PO limit for this line (remaining after other pending PRs: {formatPkr(selectedPoLine.effective_remaining)}).</p>
+                ) : null}
+              </div>
+            ) : (
+              <div className={`md:col-span-2 space-y-2 ${duplicateBorderClass ? `rounded-lg border p-3 ${duplicateBorderClass}` : ''}`}>
+                <label className="block text-sm font-medium">Item code (optional, no PO on project)</label>
+                <Input
+                  value={fallbackItemCode}
+                  onChange={(e) => setFallbackItemCode(e.target.value)}
+                  placeholder="SKU when project has no linked PO"
+                />
+                {showDuplicateHighlight ? (
+                  <p className="text-sm text-amber-200/90">
+                    You have already submitted {previousSameItemCount}{' '}
+                    {previousSameItemCount === 1 ? 'request' : 'requests'} for this item code.
+                  </p>
+                ) : null}
+              </div>
+            )}
+
+            {hasProjectPo && selectedPoLine && lineDrivesAmount ? (
+              <>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium">Quantity</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    step="0.0001"
+                    value={requestedQty}
+                    onChange={(e) => setRequestedQty(e.target.value)}
+                    placeholder="Units to order"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium">Unit price</label>
+                  <div className="rounded-lg border border-white/10 bg-[#2a2640]/80 px-3 py-2 text-sm text-foreground">
+                    {formatPkr(Number(selectedPoLine.unit_price))}
+                  </div>
+                </div>
+                <div className="md:col-span-2 space-y-2">
+                  <label className="block text-sm font-medium">Amount (quantity × unit price)</label>
+                  <Input
+                    type="number"
+                    value={computedAmount ?? ''}
+                    readOnly
+                    disabled
+                    className="opacity-90 cursor-not-allowed bg-[#2a2640]/60"
+                  />
+                  {computedAmount == null && requestedQty.trim() ? (
+                    <p className="text-xs text-muted-foreground">Enter a quantity greater than 0.</p>
+                  ) : null}
+                </div>
+              </>
+            ) : hasProjectPo && selectedPoLine && !lineDrivesAmount ? (
+              <div className="md:col-span-2 space-y-2">
+                <label className="block text-sm font-medium">Amount</label>
+                <p className="text-xs text-amber-200/90 mb-1">
+                  This line has no unit price — enter the total amount manually.
+                </p>
+                <Input
+                  type="number"
+                  value={amount}
+                  onChange={(e) => setAmount(Number(e.target.value))}
+                  min={0}
+                  step="0.01"
+                />
+              </div>
+            ) : !hasProjectPo ? (
+              <div className="md:col-span-2 space-y-2">
+                <label className="block text-sm font-medium">Amount</label>
+                <Input
+                  type="number"
+                  value={amount}
+                  onChange={(e) => setAmount(Number(e.target.value))}
+                  min={0}
+                  step="0.01"
+                />
+              </div>
+            ) : (
+              <p className="md:col-span-2 text-sm text-muted-foreground">
+                Select a PO line to enter quantity and amount.
+              </p>
+            )}
+
             <div className="md:col-span-2 space-y-2">
               <label className="block text-sm font-medium">Description</label>
               <Input
@@ -252,23 +529,14 @@ export default function PurchaseRequestsPage() {
               ) : null}
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-sm font-medium">Amount</label>
-              <Input
-                type="number"
-                value={amount}
-                onChange={(e) => setAmount(Number(e.target.value))}
-                min={0}
-                step="0.01"
-                required
-              />
-              {isOverBudget ? (
+            {isOverBudgetNoPo ? (
+              <div className="md:col-span-2">
                 <p className="text-sm font-medium text-rose-300">
                   This exceeds the available budget ({formatPkr(availableBudget!)}). Reduce the amount or pick another
                   project.
                 </p>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
 
             <div className="space-y-2">
               <label className="block text-sm font-medium">Upload Document (Optional)</label>
@@ -284,7 +552,13 @@ export default function PurchaseRequestsPage() {
 
             <Button
               className="md:col-span-2"
-              disabled={mutation.isPending || isOverBudget || descriptionInvalid}
+              disabled={
+                mutation.isPending ||
+                descriptionInvalid ||
+                isOverBudgetNoPo ||
+                (hasProjectPo &&
+                  (!selectedPoLine || exceedsLineBudget || effectiveAmount <= 0))
+              }
               type="submit"
             >
               {mutation.isPending ? 'Submitting...' : 'Submit PR'}
@@ -297,12 +571,21 @@ export default function PurchaseRequestsPage() {
           {prLoading ? (
             <div className="text-sm text-muted-foreground">Loading...</div>
           ) : (
-            <TableWrapper className="max-h-[420px] overflow-y-auto rounded-xl border border-white/10">
+            <TableWrapper className="max-h-[480px] overflow-x-auto overflow-y-auto rounded-xl border border-white/10">
               <Table>
                 <THead>
                   <TR>
+                    <TH>Item code</TH>
                     <TH>Description</TH>
-                    <TH>Amount</TH>
+                    <TH>Unit price</TH>
+                    <TH>
+                      <span title="Requested quantity">Qty</span>
+                    </TH>
+                    <TH>Requested</TH>
+                    <TH>
+                      <span title="PO line remaining (net of other pending PRs on this line)">Remaining</span>
+                    </TH>
+                    <TH>After approval</TH>
                     <TH>Status</TH>
                     <TH>Request</TH>
                     {isAdmin ? <TH>Actions</TH> : null}
@@ -311,16 +594,15 @@ export default function PurchaseRequestsPage() {
                 <TBody>
                   {(prData?.purchaseRequests ?? []).map((pr) => (
                     <TR key={pr.id}>
-                      <TD>{pr.description}</TD>
-                      <TD>{pr.amount}</TD>
-                      <TD>{pr.status}</TD>
-                      <TD>
+                      <PrPoLineMetricsCells summary={pr.po_line_summary} />
+                      <TD className="text-xs">{pr.status}</TD>
+                      <TD className="text-xs">
                         {isAdmin ? (
                           <Link className="text-purple-300 underline" href={`/purchase-requests/${pr.id}`}>
-                            PR: {pr.id.slice(0, 8)}...
+                            {pr.id.slice(0, 8)}…
                           </Link>
                         ) : (
-                          <>PR: {pr.id.slice(0, 8)}...</>
+                          <>{pr.id.slice(0, 8)}…</>
                         )}
                       </TD>
                       {isAdmin ? (
@@ -348,6 +630,35 @@ export default function PurchaseRequestsPage() {
             <div className="text-sm text-muted-foreground">No purchase requests found.</div>
           ) : null}
         </Card>
+        {duplicateModalOpen ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
+            <Card className="max-w-md w-full p-6 space-y-4 border border-amber-500/40 shadow-xl">
+              <h3 className="text-lg font-medium text-amber-100">Duplicate item</h3>
+              <p className="text-sm text-foreground/90">
+                You are requesting this item for the {ordinalTimeWord(nextOccurrence)} time.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Continue only if you intend to order this same item again.
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="secondary" onClick={() => setDuplicateModalOpen(false)}>
+                  Go back
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => {
+                    setDuplicateModalOpen(false);
+                    mutation.mutate();
+                  }}
+                  disabled={mutation.isPending}
+                >
+                  Continue to submit
+                </Button>
+              </div>
+            </Card>
+          </div>
+        ) : null}
+
         {overrideTarget && isAdmin ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
             <Card className="max-w-md w-full p-6 space-y-4 border border-white/15 shadow-xl">

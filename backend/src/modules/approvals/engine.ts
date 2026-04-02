@@ -33,7 +33,7 @@ async function notifyUser(params: { userId: string; type: string; message: strin
 export async function startApprovalsForPurchaseRequest(prId: string, triggeredBy: string) {
   const { data: pr, error: prErr } = await supabaseAdmin
     .from('purchase_requests')
-    .select('id, amount, project_id, created_by, status')
+    .select('id, amount, project_id, created_by, status, duplicate_count')
     .eq('id', prId)
     .single();
   if (prErr || !pr) throw prErr ?? new AppError('Purchase request not found', 404);
@@ -45,12 +45,16 @@ export async function startApprovalsForPurchaseRequest(prId: string, triggeredBy
   const project = await fetchProjectOrThrow(pr.project_id as string);
   const stageList = await buildApprovalStagesForProject(project);
 
+  const dupCount = Number(pr.duplicate_count ?? 1);
+  const duplicateNote =
+    dupCount > 1 ? `This item has been requested ${dupCount} times by the same user.` : null;
+
   const approvalsToInsert = stageList.map((s) => ({
     request_id: pr.id,
     approver_id: s.approver_id,
     role: s.role,
     status: 'pending',
-    comments: null,
+    comments: duplicateNote,
   }));
 
   const { error: insErr } = await supabaseAdmin.from('approvals').upsert(approvalsToInsert, {
@@ -109,12 +113,51 @@ function rolesAreFullyApproved(params: { requestId: string; roles: ApprovalStage
     });
 }
 
-async function applyBudgetDecrementForApprovedPr(pr: {
-  id: string;
-  amount: number | string;
-  project_id: string;
-  created_by: string;
-}, actorUserId: string) {
+async function applyBudgetDecrementForApprovedPr(
+  pr: {
+    id: string;
+    amount: number | string;
+    project_id: string;
+    created_by: string;
+    po_line_id?: string | null;
+  },
+  actorUserId: string,
+) {
+  const lineId = pr.po_line_id ?? null;
+  if (lineId) {
+    const { data: lineRow, error: lineErr } = await supabaseAdmin
+      .from('purchase_orders')
+      .select('id, remaining_amount, remaining_value')
+      .eq('id', lineId)
+      .single();
+    if (lineErr || !lineRow) throw lineErr ?? new AppError('PO line not found', 404);
+
+    if (Number(lineRow.remaining_value) < Number(pr.amount) || Number(lineRow.remaining_amount) < Number(pr.amount)) {
+      await supabaseAdmin.from('purchase_requests').update({ status: 'rejected' }).eq('id', pr.id);
+      await supabaseAdmin
+        .from('approvals')
+        .update({ status: 'rejected', comments: 'Auto-rejected due to insufficient remaining PO line balance' })
+        .eq('request_id', pr.id)
+        .eq('status', 'pending');
+      await writeAuditLog({
+        action: 'pr_rejected_insufficient_po_line_balance',
+        userId: actorUserId,
+        entity: 'purchase_request',
+        entityId: pr.id,
+      });
+      throw new AppError('Insufficient remaining balance on PO line for approval', 409);
+    }
+
+    const nextRem = Number(lineRow.remaining_amount) - Number(pr.amount);
+    const nextVal = Number(lineRow.remaining_value) - Number(pr.amount);
+    const { error: lineDecErr } = await supabaseAdmin
+      .from('purchase_orders')
+      .update({ remaining_amount: nextRem, remaining_value: nextVal })
+      .eq('id', lineId);
+    if (lineDecErr) throw lineDecErr;
+    return;
+  }
+
   const projectId = pr.project_id;
   const { data: projectRow, error: projRowErr } = await supabaseAdmin
     .from('projects')
@@ -199,7 +242,7 @@ export async function decideApproval(params: {
 
   const { data: pr, error: prErr } = await supabaseAdmin
     .from('purchase_requests')
-    .select('id, amount, project_id, created_by, status')
+    .select('id, amount, project_id, created_by, status, duplicate_count, po_line_id')
     .eq('id', approval.request_id)
     .single();
   if (prErr || !pr) throw prErr ?? new AppError('Purchase request not found', 404);
@@ -227,11 +270,17 @@ export async function decideApproval(params: {
     if (!allApproved) throw new AppError('Cannot decide before previous stages are approved', 409);
   }
 
+  const dupCount = Number(pr.duplicate_count ?? 1);
+  const duplicatePrefix =
+    dupCount > 1 ? `This item has been requested ${dupCount} times by the same user.` : null;
+  const userPart = comments?.trim() ?? '';
+  const mergedComments = [duplicatePrefix, userPart].filter(Boolean).join('\n\n') || null;
+
   const { data: updatedApprovals, error: updErr } = await supabaseAdmin
     .from('approvals')
     .update({
       status: decisionNormalized,
-      comments: comments ?? null,
+      comments: mergedComments,
     })
     .eq('request_id', approval.request_id)
     .eq('approver_id', actorUserId)
@@ -299,7 +348,16 @@ export async function decideApproval(params: {
     return { prId: pr.id, status: 'pending' as const, approval: updatedApproval };
   }
 
-  await applyBudgetDecrementForApprovedPr(pr, actorUserId);
+  await applyBudgetDecrementForApprovedPr(
+    {
+      id: pr.id,
+      amount: pr.amount,
+      project_id: pr.project_id as string,
+      created_by: pr.created_by,
+      po_line_id: (pr as { po_line_id?: string | null }).po_line_id ?? null,
+    },
+    actorUserId,
+  );
 
   const { error: prOkErr } = await supabaseAdmin.from('purchase_requests').update({ status: 'approved' }).eq('id', pr.id);
   if (prOkErr) throw prOkErr;
@@ -332,7 +390,7 @@ export async function adminOverridePurchaseRequest(params: {
 
   const { data: pr, error: prErr } = await supabaseAdmin
     .from('purchase_requests')
-    .select('id, status, created_by, amount, project_id')
+    .select('id, status, created_by, amount, project_id, po_line_id')
     .eq('id', requestId)
     .single();
   if (prErr || !pr) throw prErr ?? new AppError('Purchase request not found', 404);
@@ -357,6 +415,7 @@ export async function adminOverridePurchaseRequest(params: {
         amount: pr.amount,
         project_id: pr.project_id as string,
         created_by: pr.created_by,
+        po_line_id: (pr as { po_line_id?: string | null }).po_line_id ?? null,
       },
       actorUserId,
     );

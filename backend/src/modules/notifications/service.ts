@@ -30,6 +30,18 @@ export async function enqueueEmailPlaceholder(params: {
   if (error) throw error;
 }
 
+export async function notifyAllAdmins(params: { type: string; message: string }) {
+  const { data, error } = await supabaseAdmin.from('users').select('id').eq('role', 'admin');
+  if (error) throw error;
+  for (const row of data ?? []) {
+    await createInAppNotification({
+      userId: row.id as string,
+      type: params.type,
+      message: params.message,
+    });
+  }
+}
+
 export async function getUserEmail(userId: string): Promise<string | null> {
   const { data, error } = await supabaseAdmin
     .from('users')

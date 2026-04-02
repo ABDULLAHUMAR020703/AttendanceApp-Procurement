@@ -24,13 +24,13 @@ create table if not exists public.users (
 create index if not exists users_department_idx on public.users (department);
 create index if not exists users_role_idx on public.users (role);
 
--- PURCHASE ORDERS (PO)
+-- PURCHASE ORDERS (PO) — line-level rows use po_line_sn unique; po_number/vendor nullable for line items
 create table if not exists public.purchase_orders (
   id uuid primary key default gen_random_uuid(),
-  po_number text not null unique,
-  vendor text not null,
-  total_value numeric(20, 2) not null check (total_value >= 0),
-  remaining_value numeric(20, 2) not null check (remaining_value >= 0),
+  po_number text,
+  vendor text,
+  total_value numeric(20, 2) not null default 0 check (total_value >= 0),
+  remaining_value numeric(20, 2) not null default 0 check (remaining_value >= 0),
   uploaded_by uuid not null references public.users (id),
   created_at timestamptz not null default now()
 );
@@ -69,6 +69,10 @@ create table if not exists public.purchase_requests (
   description text not null,
   amount numeric(20, 2) not null check (amount > 0),
   document_url text,
+  item_code text,
+  duplicate_count integer not null default 1,
+  po_line_id uuid references public.purchase_orders (id) on delete set null,
+  requested_quantity numeric(20, 4),
   status text not null default 'pending' check (status in ('pending','approved','rejected','pending_exception')),
   created_by uuid not null references public.users (id),
   created_at timestamptz not null default now()
@@ -76,6 +80,11 @@ create table if not exists public.purchase_requests (
 
 create index if not exists purchase_requests_project_idx on public.purchase_requests (project_id);
 create index if not exists purchase_requests_status_idx on public.purchase_requests (status);
+create index if not exists purchase_requests_created_by_item_code_idx on public.purchase_requests (created_by, item_code)
+where item_code is not null;
+
+create index if not exists purchase_requests_po_line_id_idx on public.purchase_requests (po_line_id)
+where po_line_id is not null;
 
 -- APPROVALS (sequential stages: team_lead → pm → admin; team_lead row omitted when no team_lead_id)
 create table if not exists public.approvals (

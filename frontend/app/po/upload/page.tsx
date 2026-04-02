@@ -12,12 +12,23 @@ import { PageHeader } from '../../../components/ui/PageHeader';
 import { useAuth } from '../../../features/auth/AuthProvider';
 import { getAccessTokenFromSupabaseSession, NoSessionError } from '../../../lib/api';
 
+type UploadResult = {
+  ok?: boolean;
+  mode?: string;
+  totalRows?: number;
+  inserted?: number;
+  updated?: number;
+  failed?: number;
+  skipped?: number;
+  duplicatesHandled?: string[];
+};
+
 export default function PoUploadPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { profile, supabase } = useAuth();
   const [file, setFile] = useState<File | null>(null);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<UploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -46,7 +57,7 @@ export default function PoUploadPage() {
         headers: { Authorization: `Bearer ${bearer}` },
         body: fd,
       });
-      const json = await res.json().catch(() => ({}));
+      const json = (await res.json().catch(() => ({}))) as UploadResult & { message?: string };
       if (!res.ok) throw new Error(json.message ?? 'Upload failed');
       setResult(json);
       await queryClient.invalidateQueries({ queryKey: ['po'] });
@@ -59,19 +70,18 @@ export default function PoUploadPage() {
   };
 
   const role = profile?.role;
+  const canUpload = role === 'admin' || role === 'pm';
 
   return (
     <AppLayout>
       <PageContainer className="space-y-6">
         <PageHeader
           title="PO Upload"
-          subtitle="Upload a CSV/XLSX with columns: po_number, vendor, total_value."
+          subtitle="Line items: PO, Item Code, Description, Unit Price, PO Amount, PO+LINE+SN (CSV/XLSX). Admins may also use legacy columns: po_number, vendor, total_value."
         />
 
-        {role !== 'admin' ? (
-          <Card className="p-4 text-sm text-rose-300">
-            Only admins can upload purchase orders.
-          </Card>
+        {!canUpload ? (
+          <Card className="p-4 text-sm text-rose-300">Only admins and PMs can upload purchase orders.</Card>
         ) : (
           <Card className="p-6">
             <form onSubmit={onSubmit} className="space-y-4">
@@ -90,7 +100,24 @@ export default function PoUploadPage() {
               </Button>
 
               {error ? <div className="text-sm text-rose-300">{error}</div> : null}
-              {result ? <div className="text-sm text-emerald-300">Success: {JSON.stringify(result)}</div> : null}
+
+              {result?.ok ? (
+                <Card className="p-4 mt-2 border border-emerald-500/30 bg-emerald-950/20 space-y-2">
+                  <div className="text-sm font-medium text-emerald-200">Upload summary</div>
+                  <ul className="text-sm text-slate-200 space-y-1 list-disc pl-5">
+                    <li>Total rows: {result.totalRows ?? '—'}</li>
+                    <li>Inserted: {result.inserted ?? 0}</li>
+                    <li>Updated: {result.updated ?? 0}</li>
+                    <li>Failed: {result.failed ?? 0}</li>
+                    {result.mode === 'legacy_vendor' && result.skipped != null ? (
+                      <li>Vendor merge (extra rows): {result.skipped}</li>
+                    ) : null}
+                  </ul>
+                  {result.mode === 'legacy_vendor' && result.duplicatesHandled && result.duplicatesHandled.length > 0 ? (
+                    <div className="text-xs text-slate-400">Vendors merged: {result.duplicatesHandled.join(', ')}</div>
+                  ) : null}
+                </Card>
+              ) : null}
             </form>
           </Card>
         )}
@@ -98,4 +125,3 @@ export default function PoUploadPage() {
     </AppLayout>
   );
 }
-

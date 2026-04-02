@@ -14,7 +14,7 @@ const navItems = [
     label: 'Dashboard',
     roles: ['employee', 'admin', 'pm'],
   },
-  { href: '/po/upload', label: 'PO Upload', roles: ['admin'] },
+  { href: '/po/upload', label: 'PO Upload', roles: ['admin', 'pm'] },
   {
     href: '/projects',
     label: 'Projects',

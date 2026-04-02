@@ -1,11 +1,15 @@
 import { Router } from 'express';
 import multer from 'multer';
+import { z } from 'zod';
 import { requireAuth } from '../../middleware/auth';
 import { requireRole } from '../../middleware/rbac';
-import { parsePoFile } from './service';
+import { searchPoLinesForProject } from './searchLines';
+import { parsePoUploadFile, calcRemainingAmount, type ParsedLineItemRow } from './service';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { writeAuditLog } from '../auditLogs/service';
+import { notifyAllAdmins } from '../notifications/service';
+import type { UserRole } from '../auth/types';
 
 export const poRouter = Router();
 
@@ -17,27 +21,221 @@ function normalizeVendor(vendor: string) {
   return vendor.trim().toLowerCase();
 }
 
-poRouter.post('/upload', requireRole('admin'), upload.single('file'), async (req, res, next) => {
+function num(v: unknown, fallback: number): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function lineItemToPayload(
+  row: ParsedLineItemRow,
+  existing: Record<string, unknown> | null,
+  actorUserId: string,
+  options: { enforceUploaderDepartment: string | null },
+) {
+  const ex = existing ?? {};
+  const po_amount = row.po_amount;
+  const po_invoiced = row.extras.po_invoiced !== undefined ? num(row.extras.po_invoiced, 0) : num(ex.po_invoiced, 0);
+  const po_acceptance_approved =
+    row.extras.po_acceptance_approved !== undefined
+      ? num(row.extras.po_acceptance_approved, 0)
+      : num(ex.po_acceptance_approved, 0);
+  const pending_to_apply =
+    row.extras.pending_to_apply !== undefined ? num(row.extras.pending_to_apply, 0) : num(ex.pending_to_apply, 0);
+
+  const remaining_amount = calcRemainingAmount({
+    po_amount,
+    po_invoiced,
+    po_acceptance_approved,
+    pending_to_apply,
+  });
+
+  const customerStr =
+    row.extras.customer !== undefined ? String(row.extras.customer).trim() : String(ex.customer ?? '').trim();
+
+  const rest = { ...row.extras };
+  delete rest.po_invoiced;
+  delete rest.po_acceptance_approved;
+  delete rest.pending_to_apply;
+
+  const department =
+    options.enforceUploaderDepartment ??
+    (rest.department !== undefined ? String(rest.department) : (ex.department as string | undefined)) ??
+    null;
+
+  const base: Record<string, unknown> = {
+    ...rest,
+    po: row.po,
+    po_line_sn: row.po_line_sn,
+    item_code: row.item_code,
+    description: row.description,
+    unit_price: row.unit_price,
+    po_amount,
+    po_invoiced,
+    po_acceptance_approved,
+    pending_to_apply,
+    po_acceptance_pending:
+      row.extras.po_acceptance_pending !== undefined
+        ? num(row.extras.po_acceptance_pending, 0)
+        : num(ex.po_acceptance_pending, 0),
+    acceptance_rejected_amount:
+      row.extras.acceptance_rejected_amount !== undefined
+        ? num(row.extras.acceptance_rejected_amount, 0)
+        : num(ex.acceptance_rejected_amount, 0),
+    wnd: row.extras.wnd !== undefined ? num(row.extras.wnd, 0) : num(ex.wnd, 0),
+    remaining_amount,
+    po_number: row.po,
+    vendor: customerStr || '—',
+    total_value: po_amount,
+    remaining_value: remaining_amount,
+    uploaded_by: actorUserId,
+    department,
+  };
+
+  for (const k of Object.keys(base)) {
+    if (base[k] === undefined) delete base[k];
+  }
+
+  return base;
+}
+
+async function handleLineItemUpload(params: {
+  rows: ParsedLineItemRow[];
+  actorUserId: string;
+  actorRole: UserRole;
+  actorDepartment: string | null;
+}): Promise<{
+  totalRows: number;
+  inserted: number;
+  updated: number;
+  failed: number;
+  firstEntityId: string | null;
+}> {
+  const { rows, actorUserId, actorRole, actorDepartment } = params;
+  const enforceDept = actorRole === 'pm' ? actorDepartment : null;
+
+  let inserted = 0;
+  let updated = 0;
+  let failed = 0;
+  let firstEntityId: string | null = null;
+
+  for (const row of rows) {
+    try {
+      const { data: existing, error: findErr } = await supabaseAdmin
+        .from('purchase_orders')
+        .select('*')
+        .eq('po_line_sn', row.po_line_sn)
+        .maybeSingle();
+      if (findErr) throw findErr;
+
+      const payload = lineItemToPayload(row, existing, actorUserId, {
+        enforceUploaderDepartment: enforceDept,
+      });
+
+      if (existing?.id) {
+        const { data: upd, error: updErr } = await supabaseAdmin
+          .from('purchase_orders')
+          .update(payload)
+          .eq('id', existing.id as string)
+          .select('id')
+          .single();
+        if (updErr) throw updErr;
+        updated += 1;
+        if (upd?.id && !firstEntityId) firstEntityId = upd.id as string;
+      } else {
+        const { data: ins, error: insErr } = await supabaseAdmin
+          .from('purchase_orders')
+          .insert(payload)
+          .select('id')
+          .single();
+        if (insErr) throw insErr;
+        inserted += 1;
+        if (ins?.id && !firstEntityId) firstEntityId = ins.id as string;
+      }
+    } catch {
+      failed += 1;
+    }
+  }
+
+  if (inserted === 0 && updated === 0 && failed === rows.length) {
+    throw new AppError('All PO rows failed to save. Check data types and constraints.', 400);
+  }
+
+  return { totalRows: rows.length, inserted, updated, failed, firstEntityId };
+}
+
+poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), async (req, res, next) => {
   try {
     const actorUserId = req.auth!.userId;
+    const actorRole = req.auth!.role;
+    const actorDepartment = req.auth!.department ?? null;
     if (!req.file) throw new AppError('Missing `file` upload field', 400);
 
-    const rows = parsePoFile({
+    const parsed = parsePoUploadFile({
       fileBuffer: req.file.buffer,
       originalName: req.file.originalname,
       mimeType: req.file.mimetype,
     });
 
+    if (parsed.mode === 'line_items') {
+      if (actorRole === 'pm' && !actorDepartment) {
+        throw new AppError('PM profile must include a department for PO upload', 400);
+      }
+
+      const result = await handleLineItemUpload({
+        rows: parsed.rows,
+        actorUserId,
+        actorRole,
+        actorDepartment,
+      });
+
+      const { data: actor } = await supabaseAdmin
+        .from('users')
+        .select('name, email')
+        .eq('id', actorUserId)
+        .maybeSingle();
+
+      const actorLabel = String(actor?.name ?? actor?.email ?? actorUserId);
+
+      if (actorRole === 'pm') {
+        await notifyAllAdmins({
+          type: 'pm_po_upload',
+          message: `PM uploaded new PO data (${result.inserted} inserted, ${result.updated} updated, ${result.failed} failed). Uploaded by ${actorLabel}.`,
+        });
+      }
+
+      if (result.firstEntityId) {
+        await writeAuditLog({
+          action: 'po_uploaded',
+          userId: actorUserId,
+          entity: 'purchase_order',
+          entityId: result.firstEntityId,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        mode: 'line_items',
+        totalRows: result.totalRows,
+        inserted: result.inserted,
+        updated: result.updated,
+        failed: result.failed,
+      });
+    }
+
+    if (actorRole !== 'admin') {
+      throw new AppError('Only admins may use legacy vendor/total_value CSV layout.', 403);
+    }
+
+    const rows = parsed.rows;
     if (rows.length === 0) throw new AppError('No valid PO rows found', 400);
 
-    // Aggregate by normalized vendor to avoid duplicate vendor rows in incremental uploads.
     const aggregatedByVendor = new Map<string, { vendorDisplay: string; po_number: string; total_value: number; rowCount: number }>();
     for (const r of rows) {
       const key = normalizeVendor(r.vendor);
       const prev = aggregatedByVendor.get(key);
       if (prev) {
         prev.total_value += Number(r.total_value);
-        prev.po_number = r.po_number; // keep latest PO number seen for this vendor batch
+        prev.po_number = r.po_number;
         prev.rowCount += 1;
       } else {
         aggregatedByVendor.set(key, {
@@ -81,7 +279,6 @@ poRouter.post('/upload', requireRole('admin'), upload.single('file'), async (req
         const { data: upd, error: updErr } = await supabaseAdmin
           .from('purchase_orders')
           .update({
-            // Merge incremental uploads into existing vendor totals/balance.
             total_value: Number(existing.total_value) + Number(item.total_value),
             remaining_value: Number(existing.remaining_value) + Number(item.total_value),
             po_number: item.po_number,
@@ -124,8 +321,11 @@ poRouter.post('/upload', requireRole('admin'), upload.single('file'), async (req
 
     res.json({
       ok: true,
-      added,
+      mode: 'legacy_vendor',
+      totalRows: rows.length,
+      inserted: added,
       updated,
+      failed: 0,
       skipped: duplicateRowsMerged,
       duplicatesHandled: duplicateVendorsHandled,
     });
@@ -134,13 +334,57 @@ poRouter.post('/upload', requireRole('admin'), upload.single('file'), async (req
   }
 });
 
-poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (_req, res) => {
-  const { data, error } = await supabaseAdmin
+poRouter.get('/search', requireRole('admin', 'pm', 'employee'), async (req, res, next) => {
+  try {
+    const projectId = z.string().uuid().parse(req.query.project_id);
+    const qRaw = req.query.q;
+    const q = typeof qRaw === 'string' ? qRaw : Array.isArray(qRaw) ? String(qRaw[0] ?? '') : '';
+    const limitParsed = z.coerce.number().int().min(1).max(50).safeParse(req.query.limit);
+    const limit = limitParsed.success ? limitParsed.data : 20;
+    const { lines } = await searchPoLinesForProject({
+      projectId,
+      q,
+      limit,
+      actorRole: req.auth!.role,
+      actorDepartment: req.auth!.department ?? null,
+    });
+    res.json({ lines });
+  } catch (err) {
+    next(err);
+  }
+});
+
+poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res) => {
+  const actorRole = req.auth!.role;
+  const actorUserId = req.auth!.userId;
+  const actorDepartment = req.auth!.department ?? null;
+
+  let q = supabaseAdmin
     .from('purchase_orders')
-    .select('id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at')
+    .select(
+      'id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at, po, po_line_sn, item_code, department, po_amount, remaining_amount',
+    )
     .order('created_at', { ascending: false })
     .limit(200);
+
+  if (actorRole !== 'admin') {
+    let fromProjects: string[] = [];
+    if (actorDepartment) {
+      const { data: projs, error: pErr } = await supabaseAdmin
+        .from('projects')
+        .select('po_id')
+        .eq('department', actorDepartment)
+        .not('po_id', 'is', null);
+      if (pErr) throw pErr;
+      fromProjects = [...new Set((projs ?? []).map((p) => p.po_id as string).filter(Boolean))];
+    }
+    const orParts = [`uploaded_by.eq.${actorUserId}`];
+    if (actorDepartment) orParts.push(`department.eq.${actorDepartment}`);
+    if (fromProjects.length) orParts.push(`id.in.(${fromProjects.join(',')})`);
+    q = q.or(orParts.join(','));
+  }
+
+  const { data, error } = await q;
   if (error) throw error;
   res.json({ purchaseOrders: data ?? [] });
 });
-

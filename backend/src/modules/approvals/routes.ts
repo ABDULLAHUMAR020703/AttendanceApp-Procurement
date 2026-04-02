@@ -4,6 +4,7 @@ import { requireRole } from '../../middleware/rbac';
 import { z } from 'zod';
 import { adminOverridePurchaseRequest, decideApproval } from './engine';
 import { supabaseAdmin } from '../../config/supabase';
+import { enrichPurchaseRequestsWithPoLine } from '../purchaseRequests/poLineContext';
 
 export const approvalsRouter = Router();
 
@@ -31,7 +32,52 @@ approvalsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res
     if (role !== 'admin') q = q.eq('approver_id', userId);
     const { data, error } = await q;
     if (error) throw error;
-    res.json({ approvals: data ?? [] });
+    const rows = data ?? [];
+    const requestIds = [...new Set(rows.map((a) => a.request_id as string))];
+    const prMap = new Map<
+      string,
+      {
+        id: string;
+        item_code: string | null;
+        duplicate_count: number;
+        po_line_summary: unknown | null;
+      }
+    >();
+    if (requestIds.length > 0) {
+      const { data: prs, error: prErr } = await supabaseAdmin
+        .from('purchase_requests')
+        .select(
+          'id, project_id, description, amount, item_code, duplicate_count, po_line_id, requested_quantity, status',
+        )
+        .in('id', requestIds);
+      if (prErr) throw prErr;
+      const summaries = await enrichPurchaseRequestsWithPoLine(
+        (prs ?? []).map((p) => ({
+          id: p.id as string,
+          project_id: p.project_id as string,
+          description: p.description as string,
+          amount: p.amount as number | string,
+          item_code: (p.item_code as string | null) ?? null,
+          po_line_id: (p.po_line_id as string | null) ?? null,
+          requested_quantity: (p.requested_quantity as number | string | null) ?? null,
+          status: p.status as string,
+        })),
+      );
+      for (const p of prs ?? []) {
+        const id = p.id as string;
+        prMap.set(id, {
+          id,
+          item_code: (p.item_code as string | null) ?? null,
+          duplicate_count: Number(p.duplicate_count ?? 1),
+          po_line_summary: summaries.get(id) ?? null,
+        });
+      }
+    }
+    const enriched = rows.map((a) => ({
+      ...a,
+      purchase_request: prMap.get(a.request_id as string) ?? null,
+    }));
+    res.json({ approvals: enriched });
   } catch (err) {
     next(err);
   }

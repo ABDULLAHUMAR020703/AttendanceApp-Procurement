@@ -3,11 +3,33 @@ import multer from 'multer';
 import { requireAuth } from '../../middleware/auth';
 import { requireRole } from '../../middleware/rbac';
 import { z } from 'zod';
-import { createPurchaseRequest } from './service';
+import { countPreviousPrsForSameItem, createPurchaseRequest, normalizeItemCode } from './service';
+import {
+  buildPrPoLineSummary,
+  enrichPurchaseRequestsWithPoLine,
+  loadAnchorsForProjectIds,
+} from './poLineContext';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 
 export const purchaseRequestsRouter = Router();
+
+async function withPoLineSummaries(rows: Record<string, unknown>[]) {
+  if (!rows.length) return rows;
+  const map = await enrichPurchaseRequestsWithPoLine(
+    rows.map((r) => ({
+      id: r.id as string,
+      project_id: r.project_id as string,
+      description: r.description as string,
+      amount: r.amount as number | string,
+      item_code: (r.item_code as string | null) ?? null,
+      po_line_id: (r.po_line_id as string | null) ?? null,
+      requested_quantity: (r.requested_quantity as number | string | null) ?? null,
+      status: r.status as string,
+    })),
+  );
+  return rows.map((r) => ({ ...r, po_line_summary: map.get(r.id as string) ?? null }));
+}
 
 purchaseRequestsRouter.use(requireAuth);
 
@@ -23,6 +45,12 @@ purchaseRequestsRouter.post(
         project_id: z.string().uuid(),
         description: z.string().trim().min(10, 'Description must be at least 10 characters').max(5000),
         amount: z.coerce.number().positive(),
+        item_code: z.string().max(256).optional(),
+        po_line_sn: z.preprocess((v) => (v === '' || v == null ? undefined : v), z.string().max(512).optional()),
+        requested_quantity: z.preprocess(
+          (v) => (v === '' || v == null ? undefined : v),
+          z.coerce.number().positive().optional(),
+        ),
       });
       const parsed = Schema.parse(req.body);
 
@@ -32,6 +60,9 @@ purchaseRequestsRouter.post(
         projectId: parsed.project_id,
         description: parsed.description,
         amount: Number(parsed.amount),
+        itemCode: parsed.item_code?.trim() ? parsed.item_code.trim() : null,
+        poLineSn: parsed.po_line_sn?.trim() ? parsed.po_line_sn.trim() : null,
+        requestedQuantity: parsed.requested_quantity != null ? Number(parsed.requested_quantity) : null,
         documentFile: req.file
           ? {
               buffer: req.file.buffer,
@@ -59,7 +90,8 @@ purchaseRequestsRouter.get(
       const userId = req.auth!.userId;
       const role = req.auth!.role;
 
-      const select = 'id, project_id, description, amount, document_url, status, created_by, created_at';
+      const select =
+        'id, project_id, description, amount, document_url, item_code, duplicate_count, po_line_id, requested_quantity, status, created_by, created_at';
 
       if (role === 'admin') {
         const { data, error } = await supabaseAdmin
@@ -68,7 +100,8 @@ purchaseRequestsRouter.get(
           .order('created_at', { ascending: false })
           .limit(100);
         if (error) throw error;
-        return res.json({ purchaseRequests: data ?? [] });
+        const enriched = await withPoLineSummaries((data ?? []) as Record<string, unknown>[]);
+        return res.json({ purchaseRequests: enriched });
       }
 
       const { data: created, error: createdErr } = await supabaseAdmin
@@ -95,7 +128,31 @@ purchaseRequestsRouter.get(
       for (const pr of (pendingApprovals ?? []) as any[]) map.set(pr.id as string, pr);
 
       const merged = [...map.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 100);
-      res.json({ purchaseRequests: merged });
+      const enriched = await withPoLineSummaries(merged as Record<string, unknown>[]);
+      res.json({ purchaseRequests: enriched });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+purchaseRequestsRouter.get(
+  '/item-duplicate-count',
+  requireRole('admin', 'pm', 'employee'),
+  async (req, res, next) => {
+    try {
+      const q = z
+        .object({
+          item_code: z.preprocess((v) => (Array.isArray(v) ? v[0] : v), z.string().min(1).max(256)),
+        })
+        .safeParse(req.query);
+      if (!q.success) throw new AppError('item_code query parameter is required', 400);
+      const norm = normalizeItemCode(q.data.item_code);
+      if (!norm) {
+        return res.json({ previousCount: 0 });
+      }
+      const previousCount = await countPreviousPrsForSameItem(req.auth!.userId, norm);
+      res.json({ previousCount });
     } catch (err) {
       next(err);
     }
@@ -116,7 +173,9 @@ purchaseRequestsRouter.get(
 
       const { data: pr, error: prErr } = await supabaseAdmin
         .from('purchase_requests')
-        .select('id, project_id, description, amount, document_url, status, created_by, created_at')
+        .select(
+          'id, project_id, description, amount, document_url, item_code, duplicate_count, po_line_id, requested_quantity, status, created_by, created_at',
+        )
         .eq('id', requestId)
         .maybeSingle();
 
@@ -229,6 +288,21 @@ purchaseRequestsRouter.get(
 
       const currentStage = enrichedApprovals.find((a) => a.status === 'pending')?.role ?? null;
 
+      const anchors = pr.project_id ? await loadAnchorsForProjectIds([pr.project_id as string]) : new Map();
+      const anchor = pr.project_id ? anchors.get(pr.project_id as string) ?? null : null;
+      const poLineSummary = await buildPrPoLineSummary(
+        {
+          id: pr.id as string,
+          description: pr.description as string,
+          amount: pr.amount as number,
+          item_code: ((pr as { item_code?: string | null }).item_code ?? null) as string | null,
+          po_line_id: ((pr as { po_line_id?: string | null }).po_line_id ?? null) as string | null,
+          requested_quantity: (pr as { requested_quantity?: number | string | null }).requested_quantity ?? null,
+          status: pr.status as string,
+        },
+        anchor,
+      );
+
       res.json({
         purchaseRequest: pr ? {
           id: pr.id,
@@ -238,6 +312,9 @@ purchaseRequestsRouter.get(
           status: pr.status,
           createdAt: pr.created_at,
           documentUrl: pr.document_url,
+          itemCode: (pr as { item_code?: string | null }).item_code ?? null,
+          duplicateCount: Number((pr as { duplicate_count?: number | null }).duplicate_count ?? 1),
+          poLineSummary,
           currentStage,
           createdBy: creator,
         } : null,

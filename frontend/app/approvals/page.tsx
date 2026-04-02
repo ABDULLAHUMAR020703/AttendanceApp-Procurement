@@ -10,9 +10,17 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
+import { PrPoLineMetricsCells, type PoLineSummary } from '../../components/PrPoLineMetricsCells';
 import { authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 import { useState } from 'react';
 import { APPROVAL_STAGE_ORDER, approvalStageLabel, approvalPipelineStatus } from '../../lib/org';
+
+type PurchaseRequestMeta = {
+  id: string;
+  item_code: string | null;
+  duplicate_count: number;
+  po_line_summary?: PoLineSummary | null;
+};
 
 type Approval = {
   id: string;
@@ -22,7 +30,22 @@ type Approval = {
   status: string;
   comments: string | null;
   created_at: string;
+  purchase_request?: PurchaseRequestMeta | null;
 };
+
+function duplicateRequestFrameClass(dc: number): string {
+  if (dc >= 4) return 'border-red-500/55 ring-1 ring-red-500/35';
+  if (dc === 3) return 'border-orange-500/55 ring-1 ring-orange-500/35';
+  if (dc === 2) return 'border-amber-400/55 ring-1 ring-amber-400/35';
+  return '';
+}
+
+function duplicateRequestBannerClass(dc: number): string {
+  if (dc >= 4) return 'border border-red-500/40 bg-red-950/40 text-red-100';
+  if (dc === 3) return 'border border-orange-500/40 bg-orange-950/35 text-orange-100';
+  if (dc === 2) return 'border border-amber-400/40 bg-amber-950/30 text-amber-100';
+  return '';
+}
 
 function orderIndex(role: string) {
   const idx = APPROVAL_STAGE_ORDER.indexOf(role as (typeof APPROVAL_STAGE_ORDER)[number]);
@@ -166,8 +189,11 @@ export default function ApprovalsPage() {
               </TableWrapper>
             </Card>
 
-            {(data?.approvals ?? []).map((a) => (
-              <Card key={a.id} className="p-4 space-y-3">
+            {(data?.approvals ?? []).map((a) => {
+              const dupCount = a.purchase_request?.duplicate_count ?? 1;
+              const dupFrame = duplicateRequestFrameClass(dupCount);
+              return (
+              <Card key={a.id} className={`p-4 space-y-3 ${dupFrame}`.trim()}>
                 {(() => {
                   const chain = approvalsByRequest?.[a.request_id] ?? [a];
                   const currentStep = chain.find((step) => step.status === 'pending');
@@ -175,6 +201,37 @@ export default function ApprovalsPage() {
 
                   return (
                     <>
+                      {dupCount > 1 ? (
+                        <div className={`rounded-lg px-3 py-2 text-sm ${duplicateRequestBannerClass(dupCount)}`}>
+                          This item has been requested {dupCount} times by the same user.
+                          {a.purchase_request?.item_code ? (
+                            <span className="block text-xs opacity-90 mt-1">Item code: {a.purchase_request.item_code}</span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      <div className="rounded-lg border border-white/10 overflow-hidden">
+                        <div className="text-xs text-muted-foreground px-3 py-2 bg-[#2a2640]/80">PO line & amounts</div>
+                        <TableWrapper className="overflow-x-auto">
+                          <Table>
+                            <THead>
+                              <TR>
+                                <TH>Item</TH>
+                                <TH>Description</TH>
+                                <TH>Unit</TH>
+                                <TH>Qty</TH>
+                                <TH>Requested</TH>
+                                <TH>Remaining</TH>
+                                <TH>After</TH>
+                              </TR>
+                            </THead>
+                            <TBody>
+                              <TR>
+                                <PrPoLineMetricsCells summary={a.purchase_request?.po_line_summary} />
+                              </TR>
+                            </TBody>
+                          </Table>
+                        </TableWrapper>
+                      </div>
                       <div className="rounded-lg border border-white/10 bg-[#2a2640]/60 p-3">
                         <div className="text-xs text-muted-foreground mb-2">Approval flow</div>
                         <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -259,7 +316,8 @@ export default function ApprovalsPage() {
                   );
                 })()}
               </Card>
-            ))}
+            );
+            })}
             {(data?.approvals ?? []).length === 0 ? (
               <Card className="p-4 text-sm text-muted-foreground">No approvals found.</Card>
             ) : null}

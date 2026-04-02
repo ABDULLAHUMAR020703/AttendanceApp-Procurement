@@ -21,6 +21,10 @@ export function formatApiErrorMessage(body: Record<string, unknown>, fallbackSta
     const req = Number(body.requested_amount);
     const av = Number(body.available_budget);
     if (Number.isFinite(req) && Number.isFinite(av)) {
+      const msg = typeof body.message === 'string' ? body.message : '';
+      if (msg.includes('PO line') || msg.includes('Exceeds PO')) {
+        return `Exceeds PO line limit: requested ${formatPkr(req)} but only ${formatPkr(av)} available on this line.`;
+      }
       return `Requested amount (${formatPkr(req)}) exceeds available budget (${formatPkr(av)})`;
     }
   }
