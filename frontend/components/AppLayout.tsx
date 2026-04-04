@@ -7,6 +7,7 @@ import { useAuth } from '../features/auth/AuthProvider';
 import { Button } from './ui/Button';
 import { cn } from '@/lib/ui';
 import InteractiveBackground from './InteractiveBackground';
+import { BrandLogo } from './BrandLogo';
 
 const navItems = [
   {
@@ -45,16 +46,13 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen flex text-slate-200 font-sans relative overflow-hidden bg-transparent">
       <InteractiveBackground />
       <aside className="w-72 border-r border-slate-800/60 bg-[#121124]/80 backdrop-blur-md px-4 py-6 z-10 flex flex-col">
-        <div className="mb-8 px-3 flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full border border-slate-700 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-            </svg>
-          </div>
-          <div>
-            <div className="text-sm font-bold tracking-widest uppercase">hadir.AI</div>
-            <div className="text-[10px] tracking-wider text-slate-400 uppercase">Procurement</div>
-          </div>
+        <div className="mb-8 px-3">
+          <BrandLogo size="md">
+            <div>
+              <div className="text-sm font-bold tracking-widest uppercase">hadir.AI</div>
+              <div className="text-[10px] tracking-wider text-slate-400 uppercase">Procurement</div>
+            </div>
+          </BrandLogo>
         </div>
         <nav className="space-y-2 flex-1">
           {items.map((i) => (
