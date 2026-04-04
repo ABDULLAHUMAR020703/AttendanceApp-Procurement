@@ -5,7 +5,6 @@ import { createInAppNotification, enqueueEmailPlaceholder, getUserEmail } from '
 import type { UserRole } from '../auth/types';
 import type { Department } from '../auth/types';
 import { DEPARTMENTS } from '../auth/types';
-import { resolvePmUserIdForDepartment } from '../org/approvers';
 import {
   assertActorMayManageProject,
   assertUserEligibleTeamLead,
@@ -21,7 +20,10 @@ type CreateProjectInput = {
   actorDepartment: string | null;
   /** Required when actor is admin; ignored for PM (derived from actor department). */
   department?: Department | null;
-  teamLeadId?: string | null;
+  /** Department PM responsible for this project (approval workflow). */
+  pmId: string;
+  teamLeadId: string;
+  assignedEmployeeIds: string[];
 };
 
 function normalizeDepartment(value: string | null | undefined): Department | null {
@@ -50,33 +52,103 @@ function resolveProjectDepartmentForCreate(input: CreateProjectInput): Departmen
   throw new AppError('Forbidden', 403);
 }
 
-async function notifyPmsInDepartment(department: string, params: { type: string; message: string; emailSubject: string }) {
-  const { data, error } = await supabaseAdmin.from('users').select('id').eq('role', 'pm').eq('department', department);
-  if (error) throw error;
-  const ids = (data ?? []).map((r) => r.id as string);
-  const primary = ids.length ? ids : [await resolvePmUserIdForDepartment(department)];
-  for (const userId of [...new Set(primary)]) {
-    await createInAppNotification({ userId, type: params.type, message: params.message });
-    const email = await getUserEmail(userId);
-    if (email) {
-      await enqueueEmailPlaceholder({
-        toEmail: email,
-        subject: params.emailSubject,
-        body: params.message,
-      });
-    }
+async function notifyAssignedPm(pmUserId: string, params: { type: string; message: string; emailSubject: string }) {
+  await createInAppNotification({ userId: pmUserId, type: params.type, message: params.message });
+  const email = await getUserEmail(pmUserId);
+  if (email) {
+    await enqueueEmailPlaceholder({
+      toEmail: email,
+      subject: params.emailSubject,
+      body: params.message,
+    });
   }
 }
 
+async function validatePmForDepartment(pmId: string, department: string) {
+  const { data: u, error } = await supabaseAdmin.from('users').select('id, role, department').eq('id', pmId).single();
+  if (error || !u) throw error ?? new AppError('Project manager user not found', 404);
+  if (u.role !== 'pm') throw new AppError('Project manager must be a user with PM role', 400);
+  if (u.department !== department) throw new AppError('PM must belong to the project department', 400);
+}
+
+async function validateAssignedEmployees(employeeIds: string[], department: string) {
+  if (employeeIds.length === 0) return;
+  const { data: rows, error } = await supabaseAdmin.from('users').select('id, role, department').in('id', employeeIds);
+  if (error) throw error;
+  const byId = new Map((rows ?? []).map((u) => [u.id as string, u]));
+  for (const id of employeeIds) {
+    const u = byId.get(id);
+    if (!u) throw new AppError(`Unknown user in assignments: ${id}`, 400);
+    if (u.role !== 'employee') throw new AppError('Only users with the employee role can be project members', 400);
+    if (u.department !== department) throw new AppError('Assigned employees must belong to the project department', 400);
+  }
+}
+
+async function replaceProjectAssignments(projectId: string, employeeIds: string[], teamLeadId: string | null) {
+  const { error: delErr } = await supabaseAdmin.from('project_assignments').delete().eq('project_id', projectId);
+  if (delErr) throw delErr;
+  const ids = new Set(employeeIds);
+  if (teamLeadId) {
+    const { data: tl } = await supabaseAdmin.from('users').select('role').eq('id', teamLeadId).maybeSingle();
+    if (tl?.role === 'employee') ids.add(teamLeadId);
+  }
+  if (ids.size === 0) return;
+  const rows = [...ids].map((employee_id) => ({ project_id: projectId, employee_id }));
+  const { error: insErr } = await supabaseAdmin.from('project_assignments').insert(rows);
+  if (insErr) throw insErr;
+}
+
+export async function updateProjectMemberAssignments(params: {
+  projectId: string;
+  assignedEmployeeIds: string[];
+  actorUserId: string;
+  actorRole: UserRole;
+  actorDepartment: string | null;
+}) {
+  const { projectId, assignedEmployeeIds, actorUserId, actorRole, actorDepartment } = params;
+  const project = await fetchProjectOrThrow(projectId);
+
+  await assertActorMayManageProject({
+    actorUserId,
+    actorRole,
+    actorDepartment,
+    project,
+  });
+
+  const unique = [...new Set(assignedEmployeeIds)];
+  if (unique.some((id) => id === project.pm_id)) {
+    throw new AppError('Cannot assign the project PM as a member row; PM is already on the project', 400);
+  }
+
+  await validateAssignedEmployees(unique, project.department);
+  await replaceProjectAssignments(projectId, unique, project.team_lead_id);
+
+  await writeAuditLog({
+    action: 'project_members_updated',
+    userId: actorUserId,
+    entity: 'project',
+    entityType: 'project',
+    entityId: projectId,
+    changes: { assigned_employee_ids: unique },
+  });
+
+  return { ok: true as const };
+}
+
 export async function createProjectWithExceptionFlow(input: CreateProjectInput) {
-  const { name, poId, budget, createdBy, actorRole, teamLeadId } = input;
+  const { name, poId, budget, createdBy, actorRole, pmId, teamLeadId, assignedEmployeeIds } = input;
   const department = resolveProjectDepartmentForCreate(input);
 
   if (!name.trim()) throw new AppError('Project name is required', 400);
 
-  if (teamLeadId) {
-    await assertUserEligibleTeamLead({ teamLeadUserId: teamLeadId, projectDepartment: department });
+  const memberIds = [...new Set(assignedEmployeeIds)];
+  if (memberIds.some((id) => id === pmId)) {
+    throw new AppError('Project manager cannot be listed as an assigned employee', 400);
   }
+
+  await validatePmForDepartment(pmId, department);
+  await assertUserEligibleTeamLead({ teamLeadUserId: teamLeadId, projectDepartment: department });
+  await validateAssignedEmployees(memberIds, department);
 
   if (poId) {
     const { data: po, error: poErr } = await supabaseAdmin
@@ -98,19 +170,24 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
         po_id: poId,
         budget: derivedBudget,
         department,
-        team_lead_id: teamLeadId ?? null,
+        pm_id: pmId,
+        team_lead_id: teamLeadId,
         created_by: createdBy,
+        updated_by: createdBy,
         status: 'active',
         is_exception: false,
       })
-      .select('id, name, po_id, budget, status, is_exception, department, team_lead_id')
+      .select('id, name, po_id, budget, status, is_exception, department, team_lead_id, pm_id')
       .single();
     if (prErr) throw prErr;
+
+    await replaceProjectAssignments(project.id as string, memberIds, teamLeadId);
 
     await writeAuditLog({
       action: 'project_created',
       userId: createdBy,
       entity: 'project',
+      entityType: 'project',
       entityId: project.id,
     });
 
@@ -125,14 +202,18 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
       po_id: null,
       budget: Number(budget),
       department,
-      team_lead_id: teamLeadId ?? null,
+      pm_id: pmId,
+      team_lead_id: teamLeadId,
       created_by: createdBy,
+      updated_by: createdBy,
       status: 'exception_pending',
       is_exception: true,
     })
-    .select('id, name, po_id, budget, status, is_exception, department, team_lead_id')
+    .select('id, name, po_id, budget, status, is_exception, department, team_lead_id, pm_id')
     .single();
   if (prjErr || !project) throw prjErr ?? new AppError('Failed to create project', 500);
+
+  await replaceProjectAssignments(project.id as string, memberIds, teamLeadId);
 
   const { data: exception, error: exErr } = await supabaseAdmin
     .from('exceptions')
@@ -147,7 +228,7 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
   if (exErr || !exception) throw exErr ?? new AppError('Failed to create no_po exception', 500);
 
   const message = `No-PO exception requested for project "${project.name}". Approval required to proceed with purchase requests.`;
-  await notifyPmsInDepartment(department, {
+  await notifyAssignedPm(pmId, {
     type: 'exception_no_po_pending',
     message,
     emailSubject: 'No-PO Exception Approval Required',
@@ -229,14 +310,19 @@ export async function archiveProject(params: { projectId: string; actorUserId: s
     throw new AppError(ARCHIVE_BLOCKED_MESSAGE, 409);
   }
 
-  const { error: upErr } = await supabaseAdmin.from('projects').update({ status: 'archived' }).eq('id', projectId);
+  const { error: upErr } = await supabaseAdmin
+    .from('projects')
+    .update({ status: 'archived', updated_by: actorUserId })
+    .eq('id', projectId);
   if (upErr) throw upErr;
 
   await writeAuditLog({
     action: 'project_archived',
     userId: actorUserId,
     entity: 'project',
+    entityType: 'project',
     entityId: projectId,
+    changes: { status: { after: 'archived' } },
   });
 
   return { ok: true as const, status: 'archived' as const };
@@ -263,19 +349,36 @@ export async function updateProjectTeamLead(params: {
     await assertUserEligibleTeamLead({ teamLeadUserId: teamLeadId, projectDepartment: project.department });
   }
 
-  const { error } = await supabaseAdmin.from('projects').update({ team_lead_id: teamLeadId }).eq('id', projectId);
+  const { error } = await supabaseAdmin
+    .from('projects')
+    .update({ team_lead_id: teamLeadId, updated_by: actorUserId })
+    .eq('id', projectId);
   if (error) throw error;
+
+  if (teamLeadId) {
+    const { data: tl } = await supabaseAdmin.from('users').select('role').eq('id', teamLeadId).maybeSingle();
+    if (tl?.role === 'employee') {
+      await supabaseAdmin
+        .from('project_assignments')
+        .upsert(
+          { project_id: projectId, employee_id: teamLeadId },
+          { onConflict: 'project_id,employee_id' },
+        );
+    }
+  }
 
   await writeAuditLog({
     action: 'project_team_lead_updated',
     userId: actorUserId,
     entity: 'project',
+    entityType: 'project',
     entityId: projectId,
+    changes: { team_lead_id: { after: teamLeadId } },
   });
 
   const { data: updated, error: selErr } = await supabaseAdmin
     .from('projects')
-    .select('id, name, department, team_lead_id, status, po_id, budget, is_exception')
+    .select('id, name, department, team_lead_id, pm_id, status, po_id, budget, is_exception')
     .eq('id', projectId)
     .single();
   if (selErr) throw selErr;

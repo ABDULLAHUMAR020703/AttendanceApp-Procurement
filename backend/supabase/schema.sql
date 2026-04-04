@@ -31,8 +31,11 @@ create table if not exists public.purchase_orders (
   vendor text,
   total_value numeric(20, 2) not null default 0 check (total_value >= 0),
   remaining_value numeric(20, 2) not null default 0 check (remaining_value >= 0),
+  utilized_budget numeric(20, 2) generated always as (total_value - remaining_value) stored,
   uploaded_by uuid not null references public.users (id),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  updated_by uuid references public.users (id) on delete set null
 );
 
 create index if not exists purchase_orders_remaining_idx on public.purchase_orders (remaining_value);
@@ -53,7 +56,9 @@ create table if not exists public.projects (
   created_by uuid not null references public.users (id),
   status text not null default 'active',
   is_exception boolean not null default false,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  updated_by uuid references public.users (id) on delete set null
 );
 
 create index if not exists projects_po_idx on public.projects (po_id);
@@ -73,9 +78,12 @@ create table if not exists public.purchase_requests (
   duplicate_count integer not null default 1,
   po_line_id uuid references public.purchase_orders (id) on delete set null,
   requested_quantity numeric(20, 4),
+  budget_deducted boolean not null default false,
   status text not null default 'pending' check (status in ('pending','approved','rejected','pending_exception')),
   created_by uuid not null references public.users (id),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  updated_by uuid references public.users (id) on delete set null
 );
 
 create index if not exists purchase_requests_project_idx on public.purchase_requests (project_id);
@@ -95,7 +103,8 @@ create table if not exists public.approvals (
   status text not null default 'pending' check (status in ('pending','approved','rejected')),
   comments text,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  updated_by uuid references public.users (id) on delete set null
 );
 
 create index if not exists approvals_request_idx on public.approvals (request_id);
@@ -121,8 +130,10 @@ create table if not exists public.audit_logs (
   action text not null,
   user_id uuid references public.users (id),
   entity text not null,
+  entity_type text not null default 'legacy',
   entity_id uuid not null,
   reason text,
+  changes jsonb,
   timestamp timestamptz not null default now()
 );
 

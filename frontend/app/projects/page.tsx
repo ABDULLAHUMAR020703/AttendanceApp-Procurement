@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
@@ -13,8 +14,32 @@ import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/
 import { useAuth } from '../../features/auth/AuthProvider';
 import { ApiError, authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 
-type PurchaseOrder = { id: string; po_number: string; vendor: string; total_value: number; remaining_value: number };
+type PurchaseOrderGroup = {
+  po: string;
+  issue_date: string | null;
+  customer: string | null;
+  vendor: string | null;
+  total_amount: number;
+  remaining_amount: number;
+  total_value: number;
+  remaining_value: number;
+  anchor_po_line_id: string;
+  created_at: string;
+  items: Array<{
+    id: string;
+    item_code: string | null;
+    description: string | null;
+    line_no: string | null;
+    po_line_sn: string | null;
+    unit_price: number | null;
+    po_amount: number;
+    remaining_amount: number;
+  }>;
+};
 type ProjectPurchaseOrderSnapshot = { total_value: number; remaining_value: number };
+
+type UserSummary = { id: string; name: string | null; email: string | null; role: string };
+
 type Project = {
   id: string;
   name: string;
@@ -26,7 +51,9 @@ type Project = {
   created_by: string;
   department: string;
   team_lead_id: string | null;
-  /** Populated by GET /projects when project is linked to a PO (additive field). */
+  pm_id?: string | null;
+  pm?: UserSummary | null;
+  team_lead?: UserSummary | null;
   purchase_order?: ProjectPurchaseOrderSnapshot | ProjectPurchaseOrderSnapshot[] | null;
 };
 
@@ -35,7 +62,6 @@ function formatPkr(amount: number) {
   return `${new Intl.NumberFormat('en-PK', { maximumFractionDigits: 2 }).format(amount)} PKR`;
 }
 
-/** Normalize Supabase embed (object or rare array) into a single PO snapshot. */
 function linkedPurchaseOrder(p: Project): ProjectPurchaseOrderSnapshot | null {
   const raw = p.purchase_order;
   if (raw == null) return null;
@@ -91,24 +117,18 @@ function BudgetUsageBar({ total, remaining }: { total: number; remaining: number
   );
 }
 
-/** Matches backend GET /api/po allowed roles (shared PO list for procurement roles). */
 const ROLES_WITH_PO_LIST = new Set<string>(['admin', 'pm', 'employee']);
 
-const DEPARTMENTS = [
-  'sales',
-  'hr',
-  'technical',
-  'finance',
-  'engineering',
-  'ibs',
-  'power',
-  'civil_works',
-  'bss_wireless',
-  'fixed_network',
-  'warehouse',
-] as const;
+type UserRow = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  department: string | null;
+  job_title?: string | null;
+};
 
-type UserRow = { id: string; name: string; email: string; role: string; department: string | null };
+type DeptRow = { code: string; display_name: string };
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -125,7 +145,7 @@ export default function ProjectsPage() {
     enabled: !!token && !!supabase && ROLES_WITH_PO_LIST.has(profile?.role ?? ''),
     queryFn: async () => {
       try {
-        return await authedFetchWithSupabase<{ purchaseOrders: PurchaseOrder[] }>(supabase, '/api/po');
+        return await authedFetchWithSupabase<{ purchaseOrders: PurchaseOrderGroup[] }>(supabase, '/api/po');
       } catch (e) {
         if (e instanceof NoSessionError) router.replace('/login');
         throw e;
@@ -151,9 +171,47 @@ export default function ProjectsPage() {
     },
   });
 
+  const { data: departmentsData } = useQuery({
+    queryKey: ['departments', 'list'],
+    enabled: !!token && !!supabase && profile?.role === 'admin',
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ departments: DeptRow[] }>(supabase, '/api/departments');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+  });
+
+  const [department, setDepartment] = useState<string>('technical');
+  const effectiveDept = profile?.role === 'admin' ? department : (profile?.department ?? '');
+
   const { data: deptUsersData } = useQuery({
-    queryKey: ['users', 'team-lead-pool', profile?.role],
-    enabled: !!token && !!supabase && (profile?.role === 'pm' || profile?.role === 'admin'),
+    queryKey: ['users', 'by-department', effectiveDept, profile?.role],
+    enabled:
+      !!token &&
+      !!supabase &&
+      (profile?.role === 'pm' || profile?.role === 'admin') &&
+      !!effectiveDept &&
+      (profile?.role === 'pm' || (profile?.role === 'admin' && !!department)),
+    queryFn: async () => {
+      try {
+        const path =
+          profile?.role === 'admin'
+            ? `/api/users?department=${encodeURIComponent(effectiveDept)}`
+            : '/api/users';
+        return await authedFetchWithSupabase<{ users: UserRow[] }>(supabase, path);
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+  });
+
+  const { data: adminAllUsersData } = useQuery({
+    queryKey: ['users', 'admin-full-list'],
+    enabled: !!token && !!supabase && profile?.role === 'admin',
     queryFn: async () => {
       try {
         return await authedFetchWithSupabase<{ users: UserRow[] }>(supabase, '/api/users');
@@ -170,11 +228,36 @@ export default function ProjectsPage() {
   const [poId, setPoId] = useState<string>('');
   const [noPoMode, setNoPoMode] = useState(false);
   const [budget, setBudget] = useState<number>(0);
-  const [department, setDepartment] = useState<string>('technical');
+  const [pmId, setPmId] = useState<string>('');
   const [createTeamLeadId, setCreateTeamLeadId] = useState<string>('');
+  const [selectedEmployeeIds, setSelectedEmployeeIds] = useState<Set<string>>(() => new Set());
+  const [employeeSearch, setEmployeeSearch] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+
+  const deptUsers = deptUsersData?.users ?? [];
+  const pmCandidates = useMemo(() => deptUsers.filter((u) => u.role === 'pm'), [deptUsers]);
+  const teamLeadCandidates = useMemo(
+    () => deptUsers.filter((u) => u.role !== 'admin'),
+    [deptUsers],
+  );
+  const employeePool = useMemo(() => deptUsers.filter((u) => u.role === 'employee'), [deptUsers]);
+  const filteredEmployees = useMemo(() => {
+    const q = employeeSearch.trim().toLowerCase();
+    if (!q) return employeePool;
+    return employeePool.filter(
+      (u) =>
+        (u.name ?? '').toLowerCase().includes(q) ||
+        (u.email ?? '').toLowerCase().includes(q) ||
+        (u.job_title ?? '').toLowerCase().includes(q),
+    );
+  }, [employeePool, employeeSearch]);
+
+  const operationalDepartments = useMemo(
+    () => (departmentsData?.departments ?? []).filter((d) => d.code !== 'management'),
+    [departmentsData],
+  );
 
   const archiveMutation = useMutation({
     mutationFn: async (id: string) => {
@@ -203,12 +286,17 @@ export default function ProjectsPage() {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const payload: Record<string, unknown> = { name };
+      if (!pmId || !createTeamLeadId) {
+        throw new Error('Project Manager and Team Lead are required');
+      }
+      const payload: Record<string, unknown> = {
+        name,
+        pm_id: pmId,
+        team_lead_id: createTeamLeadId,
+        assigned_employee_ids: [...selectedEmployeeIds],
+      };
       if (profile?.role === 'admin') {
         payload.department = department;
-      }
-      if (createTeamLeadId) {
-        payload.team_lead_id = createTeamLeadId;
       }
       if (noPoMode) {
         payload.po_id = null;
@@ -233,11 +321,14 @@ export default function ProjectsPage() {
       setPoId('');
       setNoPoMode(false);
       setBudget(0);
+      setPmId('');
       setCreateTeamLeadId('');
+      setSelectedEmployeeIds(new Set());
+      setEmployeeSearch('');
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     },
-    onError: (err: any) => setError(err?.message ?? 'Create failed'),
+    onError: (err: unknown) => setError(err instanceof Error ? err.message : 'Create failed'),
   });
 
   const teamLeadMutation = useMutation({
@@ -260,10 +351,35 @@ export default function ProjectsPage() {
 
   const poOptions = useMemo(() => poData?.purchaseOrders ?? [], [poData]);
 
-  const teamLeadCandidatesForDept = (dept: string) =>
-    (deptUsersData?.users ?? []).filter(
-      (u) => u.department === dept && u.role !== 'admin',
-    );
+  const selectedPoGroup = useMemo(
+    () => poOptions.find((g) => g.anchor_po_line_id === poId) ?? null,
+    [poOptions, poId],
+  );
+
+  const teamLeadCandidatesForDept = (dept: string) => {
+    const pool =
+      profile?.role === 'admin' ? (adminAllUsersData?.users ?? []) : (deptUsersData?.users ?? []);
+    return pool.filter((u) => u.role !== 'admin' && u.department === dept);
+  };
+
+  const toggleEmployee = (id: string, checked: boolean) => {
+    setSelectedEmployeeIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const selectAllFiltered = () => {
+    setSelectedEmployeeIds((prev) => {
+      const next = new Set(prev);
+      for (const u of filteredEmployees) next.add(u.id);
+      return next;
+    });
+  };
+
+  const clearEmployeeSelection = () => setSelectedEmployeeIds(new Set());
 
   return (
     <AppLayout>
@@ -285,16 +401,17 @@ export default function ProjectsPage() {
               className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4"
               onSubmit={(e) => {
                 e.preventDefault();
+                if (!pmId || !createTeamLeadId) {
+                  setError('Project Manager and Team Lead are required.');
+                  return;
+                }
+                setError(null);
                 mutation.mutate();
               }}
             >
               <div className="md:col-span-2 space-y-2">
                 <label className="block text-sm font-medium">Project Name</label>
-                <Input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                />
+                <Input value={name} onChange={(e) => setName(e.target.value)} required />
               </div>
 
               {profile?.role === 'admin' ? (
@@ -305,16 +422,18 @@ export default function ProjectsPage() {
                     value={department}
                     onChange={(e) => {
                       setDepartment(e.target.value);
+                      setPmId('');
                       setCreateTeamLeadId('');
+                      setSelectedEmployeeIds(new Set());
                     }}
                   >
-                    {DEPARTMENTS.map((d) => (
-                      <option key={d} value={d}>
-                        {d}
+                    {operationalDepartments.map((d) => (
+                      <option key={d.code} value={d.code}>
+                        {d.display_name}
                       </option>
                     ))}
                   </select>
-                  <div className="text-xs text-muted-foreground">Admin assigns the operational department for this project.</div>
+                  <div className="text-xs text-muted-foreground">Pick a department first; user lists update automatically.</div>
                 </div>
               ) : (
                 <div className="md:col-span-2 text-xs text-muted-foreground">
@@ -323,21 +442,85 @@ export default function ProjectsPage() {
               )}
 
               <div className="md:col-span-2 space-y-2">
-                <label className="block text-sm font-medium">Team lead (optional)</label>
+                <label className="block text-sm font-medium">Project Manager</label>
+                <select
+                  className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
+                  value={pmId}
+                  onChange={(e) => setPmId(e.target.value)}
+                  required
+                  disabled={!effectiveDept}
+                >
+                  <option value="">Select PM ({effectiveDept || '…'})</option>
+                  {pmCandidates.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name ?? u.email} — PM
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="md:col-span-2 space-y-2">
+                <label className="block text-sm font-medium">Team Lead</label>
                 <select
                   className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
                   value={createTeamLeadId}
                   onChange={(e) => setCreateTeamLeadId(e.target.value)}
+                  required
+                  disabled={!effectiveDept}
                 >
-                  <option value="">None — PM approval is first step</option>
-                  {(profile?.role === 'admin' ? teamLeadCandidatesForDept(department) : teamLeadCandidatesForDept(profile?.department ?? '')).map(
-                    (u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.name} ({u.role})
-                      </option>
-                    ),
-                  )}
+                  <option value="">Select team lead</option>
+                  {teamLeadCandidates.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name ?? u.email} ({u.role})
+                    </option>
+                  ))}
                 </select>
+              </div>
+
+              <div className="md:col-span-2 space-y-2 rounded-lg border border-white/10 bg-[#2a2640]/40 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="block text-sm font-medium">Assigned employees</label>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="secondary" className="text-xs py-1 px-2" onClick={selectAllFiltered}>
+                      Select all (filtered)
+                    </Button>
+                    <Button type="button" variant="secondary" className="text-xs py-1 px-2" onClick={clearEmployeeSelection}>
+                      Clear
+                    </Button>
+                  </div>
+                </div>
+                <Input
+                  placeholder="Search by name, email, or job title…"
+                  value={employeeSearch}
+                  onChange={(e) => setEmployeeSearch(e.target.value)}
+                  className="text-sm"
+                />
+                <div className="text-xs text-muted-foreground">
+                  Only <span className="text-foreground">employee</span> users in this department. PM cannot be duplicated as a member row.
+                </div>
+                <div className="max-h-[200px] overflow-y-auto rounded border border-white/10 divide-y divide-white/5">
+                  {filteredEmployees.length === 0 ? (
+                    <div className="p-3 text-sm text-muted-foreground">No employees match.</div>
+                  ) : (
+                    filteredEmployees.map((u) => (
+                      <label key={u.id} className="flex items-start gap-3 px-3 py-2 text-sm cursor-pointer hover:bg-white/5">
+                        <input
+                          type="checkbox"
+                          className="mt-1 h-4 w-4 rounded border border-white/20 bg-[#2a2640]"
+                          checked={selectedEmployeeIds.has(u.id)}
+                          onChange={(e) => toggleEmployee(u.id, e.target.checked)}
+                        />
+                        <span>
+                          <span className="text-foreground">{u.name ?? u.email}</span>
+                          <span className="text-muted-foreground text-xs ml-2">{u.email}</span>
+                          {u.job_title ? (
+                            <span className="ml-2 text-[11px] uppercase tracking-wide text-amber-200/80">{u.job_title}</span>
+                          ) : null}
+                        </span>
+                      </label>
+                    ))
+                  )}
+                </div>
               </div>
 
               <div className="md:col-span-2 flex items-center gap-3">
@@ -363,14 +546,28 @@ export default function ProjectsPage() {
                     disabled={poLoading}
                   >
                     <option value="">-- Choose PO --</option>
-                    {poOptions.map((po) => (
-                      <option key={po.id} value={po.id}>
-                        {po.po_number} ({po.vendor})
+                    {poOptions.map((g) => (
+                      <option key={g.anchor_po_line_id} value={g.anchor_po_line_id}>
+                        {g.po} ({g.vendor ?? '—'})
+                        {g.items.length > 1 ? ` · ${g.items.length} line items` : ''}
                       </option>
                     ))}
                   </select>
+                  {selectedPoGroup && selectedPoGroup.items.length > 0 ? (
+                    <div className="rounded-lg border border-white/10 bg-[#2a2640]/60 p-3 text-xs space-y-2">
+                      <div className="font-medium text-foreground">Lines on this PO</div>
+                      <ul className="space-y-1 text-muted-foreground list-disc list-inside">
+                        {selectedPoGroup.items.map((it) => (
+                          <li key={it.id}>
+                            <span className="text-foreground">{it.item_code ?? it.po_line_sn ?? '—'}</span>
+                            {it.description ? ` — ${it.description}` : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                   <div className="text-xs text-muted-foreground">
-                    Budget will be derived from the selected PO remaining value.
+                    Budget is the sum of all lines for this PO (remaining value).
                   </div>
                   {poError ? <div className="text-sm text-rose-300">{String(poError)}</div> : null}
                 </div>
@@ -390,11 +587,7 @@ export default function ProjectsPage() {
 
               {error ? <div className="md:col-span-2 text-sm text-rose-300">{error}</div> : null}
 
-              <Button
-                className="md:col-span-2"
-                disabled={mutation.isPending}
-                type="submit"
-              >
+              <Button className="md:col-span-2" disabled={mutation.isPending} type="submit">
                 {mutation.isPending ? 'Creating...' : 'Create Project'}
               </Button>
             </form>
@@ -414,6 +607,7 @@ export default function ProjectsPage() {
                   <TR>
                     <TH>Project</TH>
                     <TH>Dept</TH>
+                    <TH>PM</TH>
                     <TH>Team lead</TH>
                     <TH>Status</TH>
                     <TH>Budget & usage</TH>
@@ -430,7 +624,9 @@ export default function ProjectsPage() {
                     return (
                       <TR key={p.id} className="align-top">
                         <TD>
-                          <div className="font-medium">{p.name}</div>
+                          <Link href={`/projects/${p.id}`} className="font-medium text-purple-300 hover:underline">
+                            {p.name}
+                          </Link>
                           {hasPoBudget ? (
                             <div className="mt-2 space-y-0.5 text-xs text-muted-foreground md:hidden">
                               <div>Total budget: {formatPkr(total!)}</div>
@@ -439,6 +635,9 @@ export default function ProjectsPage() {
                           ) : null}
                         </TD>
                         <TD className="text-sm capitalize">{p.department}</TD>
+                        <TD className="text-sm max-w-[140px] truncate">
+                          {p.pm?.name ?? p.pm?.email ?? '—'}
+                        </TD>
                         <TD className="min-w-[180px]">
                           {canAssignTeamLead(profile, p) ? (
                             <select
@@ -458,7 +657,9 @@ export default function ProjectsPage() {
                               ))}
                             </select>
                           ) : (
-                            <span className="text-xs text-muted-foreground">{p.team_lead_id ? p.team_lead_id.slice(0, 8) + '…' : '—'}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {p.team_lead?.name ?? p.team_lead?.email ?? (p.team_lead_id ? `${p.team_lead_id.slice(0, 8)}…` : '—')}
+                            </span>
                           )}
                         </TD>
                         <TD>{p.is_exception ? `${p.status} (exception)` : p.status}</TD>
@@ -530,13 +731,10 @@ export default function ProjectsPage() {
               <h3 id="archive-project-title" className="text-lg font-medium">
                 Delete project
               </h3>
-              <p className="text-sm text-muted-foreground">
-                Are you sure you want to delete this project?
-              </p>
+              <p className="text-sm text-muted-foreground">Are you sure you want to delete this project?</p>
               <p className="text-sm font-medium text-foreground">{archiveTarget.name}</p>
               <p className="text-xs text-muted-foreground">
-                The project will be archived (hidden from lists). This is not allowed if the project has approved
-                spend.
+                The project will be archived (hidden from lists). This is not allowed if the project has approved spend.
               </p>
               {archiveError ? <p className="text-sm text-rose-300">{archiveError}</p> : null}
               <div className="flex flex-wrap justify-end gap-2 pt-2">
@@ -567,4 +765,3 @@ export default function ProjectsPage() {
     </AppLayout>
   );
 }
-

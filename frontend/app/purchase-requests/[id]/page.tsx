@@ -11,6 +11,9 @@ import { PageHeader } from '../../../components/ui/PageHeader';
 import { useAuth } from '../../../features/auth/AuthProvider';
 import { authedFetchWithSupabase, formatPkr, NoSessionError } from '../../../lib/api';
 import { useState } from 'react';
+import { AuditHistoryModal } from '../../../components/AuditHistoryModal';
+import { LastUpdatedPanel } from '../../../components/LastUpdatedPanel';
+import { approvalStageLabel } from '../../../lib/org';
 
 type ApprovalRow = {
   id: string;
@@ -20,6 +23,7 @@ type ApprovalRow = {
   status: string;
   comments: string | null;
   created_at: string;
+  is_admin_override?: boolean | null;
   approver?: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
 };
 
@@ -31,12 +35,32 @@ type DetailResponse = {
     amount: number;
     status: string;
     createdAt: string;
+    updatedAt: string;
     documentUrl: string | null;
     currentStage: string | null;
     createdBy: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+    updatedBy: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
   };
-  project: { id: string; name: string; po_id: string | null; budget: number; status: string } | null;
-  purchaseOrder: { id: string; po_number: string; vendor: string; total_value: number; remaining_value: number } | null;
+  project: {
+    id: string;
+    name: string;
+    po_id: string | null;
+    budget: number;
+    status: string;
+    updated_at?: string;
+    updated_by?: string | null;
+    updatedBy?: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+  } | null;
+  purchaseOrder: {
+    id: string;
+    po_number: string;
+    vendor: string;
+    total_value: number;
+    remaining_value: number;
+    updated_at?: string;
+    updated_by?: string | null;
+    updatedBy?: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+  } | null;
   approvals: ApprovalRow[];
   exceptions: Array<{ id: string; type: string; status: string; approved_by: string | null; created_at: string }>;
   auditLogs: Array<{
@@ -46,6 +70,8 @@ type DetailResponse = {
     entity: string;
     entity_id: string;
     reason?: string | null;
+    entity_type?: string | null;
+    changes?: Record<string, unknown> | null;
     timestamp: string;
   }>;
 };
@@ -59,6 +85,9 @@ export default function PurchaseRequestDetailsPage() {
   const isAdmin = profile?.role === 'admin';
   const [overrideDecision, setOverrideDecision] = useState<'approved' | 'rejected'>('approved');
   const [overrideReason, setOverrideReason] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [projectHistoryOpen, setProjectHistoryOpen] = useState(false);
+  const [poHistoryOpen, setPoHistoryOpen] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['purchase-request-detail', requestId],
@@ -131,6 +160,12 @@ export default function PurchaseRequestDetailsPage() {
           <Card className="p-4 text-sm text-muted-foreground">No purchase request found.</Card>
         ) : (
           <>
+            <LastUpdatedPanel
+              updatedAt={data.purchaseRequest.updatedAt}
+              updatedBy={data.purchaseRequest.updatedBy ?? data.purchaseRequest.createdBy}
+              onViewHistory={() => setHistoryOpen(true)}
+            />
+
             <Card className="p-6 space-y-3">
               <h2 className="text-lg font-medium">Overview</h2>
               <div className="text-sm text-muted-foreground">Purchase Request ID: {data.purchaseRequest.id}</div>
@@ -144,6 +179,14 @@ export default function PurchaseRequestDetailsPage() {
               <div className="text-sm text-muted-foreground">Current Status: {data.purchaseRequest.status}</div>
               <div className="text-sm text-muted-foreground">Current Stage: {data.purchaseRequest.currentStage ?? 'Completed'}</div>
             </Card>
+
+            {data.project ? (
+              <LastUpdatedPanel
+                updatedAt={data.project.updated_at}
+                updatedBy={data.project.updatedBy ?? null}
+                onViewHistory={() => setProjectHistoryOpen(true)}
+              />
+            ) : null}
 
             <Card className="p-6 space-y-3">
               <h2 className="text-lg font-medium">Financial Info</h2>
@@ -160,6 +203,14 @@ export default function PurchaseRequestDetailsPage() {
               </div>
             </Card>
 
+            {data.purchaseOrder ? (
+              <LastUpdatedPanel
+                updatedAt={data.purchaseOrder.updated_at}
+                updatedBy={data.purchaseOrder.updatedBy ?? null}
+                onViewHistory={() => setPoHistoryOpen(true)}
+              />
+            ) : null}
+
             <Card className="p-6 space-y-3">
               <h2 className="text-lg font-medium">Approval Timeline</h2>
               {data.approvals.length === 0 ? (
@@ -168,11 +219,18 @@ export default function PurchaseRequestDetailsPage() {
                 <div className="space-y-2">
                   {data.approvals.map((a) => (
                     <div key={a.id} className="rounded border border-white/10 px-3 py-2 text-sm">
-                      <div className="font-medium">{a.role} - {a.status}</div>
+                      <div className="font-medium">
+                        {approvalStageLabel(a.role, { legacyAdmin: a.role === 'admin' })} — {a.status}
+                        {a.is_admin_override ? (
+                          <span className="ml-2 text-xs font-normal text-amber-200/90">(admin override)</span>
+                        ) : null}
+                      </div>
                       <div className="text-muted-foreground">
                         By: {a.approver?.name ?? a.approver?.email ?? a.approver_id}
                       </div>
-                      <div className="text-muted-foreground">Time: {new Date(a.created_at).toLocaleString()}</div>
+                      <div className="text-muted-foreground">
+                        Updated: {new Date((a as { updated_at?: string }).updated_at ?? a.created_at).toLocaleString()}
+                      </div>
                       {a.comments ? <div className="text-muted-foreground">Comment: {a.comments}</div> : null}
                     </div>
                   ))}
@@ -219,6 +277,11 @@ export default function PurchaseRequestDetailsPage() {
                       <div className="font-medium">{log.action}</div>
                       <div className="text-muted-foreground">Time: {new Date(log.timestamp).toLocaleString()}</div>
                       {log.reason ? <div className="text-muted-foreground">Reason: {log.reason}</div> : null}
+                      {log.changes ? (
+                        <pre className="mt-1 max-h-24 overflow-auto text-[11px] text-muted-foreground">
+                          {JSON.stringify(log.changes, null, 2)}
+                        </pre>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -226,7 +289,10 @@ export default function PurchaseRequestDetailsPage() {
             </Card>
 
             <Card className="p-6 space-y-3 border border-purple-500/30">
-              <h2 className="text-lg font-medium">Admin Override</h2>
+              <h2 className="text-lg font-medium">Override approval</h2>
+              <p className="text-sm text-muted-foreground">
+                Document a reason for audit. This bypasses the normal Team Lead → PM sequence when policy allows.
+              </p>
               <div className="flex gap-2">
                 <Button
                   type="button"
@@ -248,7 +314,7 @@ export default function PurchaseRequestDetailsPage() {
                 onChange={(e) => setOverrideReason(e.target.value)}
                 className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
                 rows={4}
-                placeholder="Reason (required)"
+                placeholder="Document why this override is appropriate (required)"
               />
               <Button
                 type="button"
@@ -256,9 +322,44 @@ export default function PurchaseRequestDetailsPage() {
                 disabled={!overrideReason.trim() || overrideMutation.isPending}
                 onClick={() => overrideMutation.mutate()}
               >
-                {overrideMutation.isPending ? 'Applying...' : 'Apply Override'}
+                {overrideMutation.isPending ? 'Applying...' : 'Apply override'}
               </Button>
             </Card>
+
+            <AuditHistoryModal
+              open={historyOpen}
+              onClose={() => setHistoryOpen(false)}
+              entityType="purchase_request"
+              entityId={data.purchaseRequest.id}
+              title="Purchase request history"
+              supabase={supabase}
+              token={accessToken ?? ''}
+              onAuthRedirect={() => router.replace('/login')}
+            />
+            {data.project ? (
+              <AuditHistoryModal
+                open={projectHistoryOpen}
+                onClose={() => setProjectHistoryOpen(false)}
+                entityType="project"
+                entityId={data.project.id}
+                title="Project history"
+                supabase={supabase}
+                token={accessToken ?? ''}
+                onAuthRedirect={() => router.replace('/login')}
+              />
+            ) : null}
+            {data.purchaseOrder ? (
+              <AuditHistoryModal
+                open={poHistoryOpen}
+                onClose={() => setPoHistoryOpen(false)}
+                entityType="purchase_order"
+                entityId={data.purchaseOrder.id}
+                title="Purchase order history"
+                supabase={supabase}
+                token={accessToken ?? ''}
+                onAuthRedirect={() => router.replace('/login')}
+              />
+            ) : null}
           </>
         )}
       </PageContainer>

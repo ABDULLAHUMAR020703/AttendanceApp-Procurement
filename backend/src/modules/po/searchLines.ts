@@ -1,6 +1,7 @@
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import type { UserRole } from '../auth/types';
+import { assertActorMayViewProject, fetchProjectForAccess } from '../projects/projectAccess';
 import { sumPendingAmountsByPoLineIds } from '../purchaseRequests/poLineContext';
 
 export type PoSearchLineDto = {
@@ -20,8 +21,17 @@ export async function searchPoLinesForProject(params: {
   limit: number;
   actorRole: UserRole;
   actorDepartment: string | null;
+  actorUserId: string;
 }): Promise<{ lines: PoSearchLineDto[] }> {
-  const { projectId, q, limit, actorRole, actorDepartment } = params;
+  const { projectId, q, limit, actorRole, actorDepartment, actorUserId } = params;
+
+  const projectAccess = await fetchProjectForAccess(projectId);
+  await assertActorMayViewProject({
+    project: projectAccess,
+    actorUserId,
+    actorRole,
+    actorDepartment,
+  });
 
   const { data: project, error: pErr } = await supabaseAdmin
     .from('projects')
@@ -29,12 +39,6 @@ export async function searchPoLinesForProject(params: {
     .eq('id', projectId)
     .single();
   if (pErr || !project) throw pErr ?? new AppError('Project not found', 404);
-
-  if (actorRole !== 'admin') {
-    if (!actorDepartment || actorDepartment !== project.department) {
-      throw new AppError('Forbidden', 403);
-    }
-  }
 
   const poId = project.po_id as string | null;
   if (!poId) {

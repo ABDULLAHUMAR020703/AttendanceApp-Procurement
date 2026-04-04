@@ -9,6 +9,7 @@ import {
   enrichPurchaseRequestsWithPoLine,
   loadAnchorsForProjectIds,
 } from './poLineContext';
+import { loadEmployeeVisibleProjectIds } from '../projects/projectAccess';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 
@@ -91,7 +92,7 @@ purchaseRequestsRouter.get(
       const role = req.auth!.role;
 
       const select =
-        'id, project_id, description, amount, document_url, item_code, duplicate_count, po_line_id, requested_quantity, status, created_by, created_at';
+        'id, project_id, description, amount, document_url, item_code, duplicate_count, po_line_id, requested_quantity, budget_deducted, status, created_by, created_at';
 
       if (role === 'admin') {
         const { data, error } = await supabaseAdmin
@@ -123,9 +124,28 @@ purchaseRequestsRouter.get(
         : { data: [] as unknown[], error: null as unknown as any };
       if (pendingErr) throw pendingErr;
 
+      let byProject: unknown[] = [];
+      if (role === 'employee' && req.auth!.department) {
+        const visible = await loadEmployeeVisibleProjectIds({
+          userId,
+          department: req.auth!.department,
+        });
+        if (visible.length > 0) {
+          const { data: prProj, error: prProjErr } = await supabaseAdmin
+            .from('purchase_requests')
+            .select(select)
+            .in('project_id', visible)
+            .order('created_at', { ascending: false })
+            .limit(100);
+          if (prProjErr) throw prProjErr;
+          byProject = prProj ?? [];
+        }
+      }
+
       const map = new Map<string, any>();
       for (const pr of (created ?? []) as any[]) map.set(pr.id as string, pr);
       for (const pr of (pendingApprovals ?? []) as any[]) map.set(pr.id as string, pr);
+      for (const pr of byProject as any[]) map.set(pr.id as string, pr);
 
       const merged = [...map.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 100);
       const enriched = await withPoLineSummaries(merged as Record<string, unknown>[]);
@@ -167,49 +187,43 @@ purchaseRequestsRouter.get(
       const requestId = req.params.id as string;
       if (!requestId) throw new AppError('Missing purchase request id', 400);
 
-      // Debug logs (temporary, can be removed after issue is resolved).
-      // eslint-disable-next-line no-console
-      console.log('PR ID:', requestId);
-
       const { data: pr, error: prErr } = await supabaseAdmin
         .from('purchase_requests')
         .select(
-          'id, project_id, description, amount, document_url, item_code, duplicate_count, po_line_id, requested_quantity, status, created_by, created_at',
+          'id, project_id, description, amount, document_url, item_code, duplicate_count, po_line_id, requested_quantity, budget_deducted, status, created_by, created_at, updated_at, updated_by',
         )
         .eq('id', requestId)
         .maybeSingle();
 
-      // eslint-disable-next-line no-console
-      console.log('PR ERROR:', prErr);
-
-      if (prErr) {
-        // eslint-disable-next-line no-console
-        console.error('Supabase error:', prErr);
-        throw new AppError('Failed to fetch purchase request', 500);
-      }
+      if (prErr) throw new AppError('Failed to fetch purchase request', 500);
       if (!pr) throw new AppError('Purchase request not found', 404);
 
-      // eslint-disable-next-line no-console
-      console.log('PR DATA:', pr);
+      const prUpdatedBy = (pr as { updated_by?: string | null }).updated_by ?? null;
 
       // Fetch related rows safely (missing joins should not crash).
-      const [creatorRes, projectRes, approvalsRes] = await Promise.all([
+      const [creatorRes, updaterRes, projectRes, approvalsRes] = await Promise.all([
         supabaseAdmin.from('users').select('id, name, email, role, department').eq('id', pr.created_by).maybeSingle(),
+        prUpdatedBy
+          ? supabaseAdmin.from('users').select('id, name, email, role, department').eq('id', prUpdatedBy).maybeSingle()
+          : Promise.resolve({ data: null, error: null }),
         pr.project_id
           ? supabaseAdmin
               .from('projects')
-              .select('id, name, po_id, budget, status, is_exception, created_by, created_at, department, team_lead_id')
+              .select(
+                'id, name, po_id, budget, status, is_exception, created_by, created_at, department, team_lead_id, updated_at, updated_by',
+              )
               .eq('id', pr.project_id)
               .maybeSingle()
           : Promise.resolve({ data: null, error: null }),
         supabaseAdmin
           .from('approvals')
-          .select('id, request_id, approver_id, role, status, comments, created_at')
+          .select('id, request_id, approver_id, role, status, comments, created_at, updated_at, updated_by, is_admin_override')
           .eq('request_id', pr.id)
           .order('created_at', { ascending: true }),
       ]);
 
       const creator = creatorRes.data ?? null;
+      const updater = updaterRes.data ?? null;
       const project = projectRes.data ?? null;
       const approvals = approvalsRes.data ?? [];
 
@@ -220,13 +234,39 @@ purchaseRequestsRouter.get(
       if (poId) {
         const { data, error } = await supabaseAdmin
           .from('purchase_orders')
-          .select('id, po_number, vendor, total_value, remaining_value')
+          .select('id, po_number, vendor, total_value, remaining_value, updated_at, updated_by')
           .eq('id', poId)
           .maybeSingle();
         // If PO missing, keep null.
         if (error) po = null;
         po = data ?? null;
       }
+
+      const projUpId = project ? (project as { updated_by?: string | null }).updated_by : null;
+      const poUpId = po ? (po as { updated_by?: string | null }).updated_by : null;
+      const touchIds = [...new Set([projUpId, poUpId].filter(Boolean))] as string[];
+      let touchMap = new Map<string, { id: string; name: string; email: string; role: string }>();
+      if (touchIds.length > 0) {
+        const { data: tu, error: tuErr } = await supabaseAdmin
+          .from('users')
+          .select('id, name, email, role')
+          .in('id', touchIds);
+        if (tuErr) throw tuErr;
+        touchMap = new Map((tu ?? []).map((u) => [u.id as string, u as { id: string; name: string; email: string; role: string }]));
+      }
+
+      const projectPayload = project
+        ? {
+            ...project,
+            updatedBy: projUpId ? touchMap.get(projUpId) ?? null : null,
+          }
+        : null;
+      const poPayload = po
+        ? {
+            ...po,
+            updatedBy: poUpId ? touchMap.get(poUpId) ?? null : null,
+          }
+        : null;
 
       const referenceIds: string[] = [pr.id];
       if (project?.id) referenceIds.push(project.id);
@@ -242,7 +282,7 @@ purchaseRequestsRouter.get(
       }
 
       // Audit logs: avoid .or string parsing issues; merge two queries.
-      const auditSelect = 'id, action, user_id, entity, entity_id, reason, timestamp';
+      const auditSelect = 'id, action, user_id, entity, entity_type, entity_id, reason, changes, timestamp';
       const { data: auditForPr, error: auditPrErr } = await supabaseAdmin
         .from('audit_logs')
         .select(auditSelect)
@@ -260,6 +300,7 @@ purchaseRequestsRouter.get(
           .from('audit_logs')
           .select(auditSelect)
           .eq('entity_id', project.id)
+          .eq('entity_type', 'project')
           .order('timestamp', { ascending: false })
           .limit(200);
         if (auditProjectErr) {
@@ -286,7 +327,10 @@ purchaseRequestsRouter.get(
         approver: approverMap.get(a.approver_id as string) ?? null,
       }));
 
-      const currentStage = enrichedApprovals.find((a) => a.status === 'pending')?.role ?? null;
+      const currentStage =
+        enrichedApprovals.find(
+          (a) => a.status === 'pending' && (a.role === 'team_lead' || a.role === 'pm'),
+        )?.role ?? null;
 
       const anchors = pr.project_id ? await loadAnchorsForProjectIds([pr.project_id as string]) : new Map();
       const anchor = pr.project_id ? anchors.get(pr.project_id as string) ?? null : null;
@@ -304,22 +348,26 @@ purchaseRequestsRouter.get(
       );
 
       res.json({
-        purchaseRequest: pr ? {
-          id: pr.id,
-          title: pr.description,
-          description: pr.description,
-          amount: pr.amount,
-          status: pr.status,
-          createdAt: pr.created_at,
-          documentUrl: pr.document_url,
-          itemCode: (pr as { item_code?: string | null }).item_code ?? null,
-          duplicateCount: Number((pr as { duplicate_count?: number | null }).duplicate_count ?? 1),
-          poLineSummary,
-          currentStage,
-          createdBy: creator,
-        } : null,
-        project,
-        purchaseOrder: po,
+        purchaseRequest: pr
+          ? {
+              id: pr.id,
+              title: pr.description,
+              description: pr.description,
+              amount: pr.amount,
+              status: pr.status,
+              createdAt: pr.created_at,
+              updatedAt: (pr as { updated_at?: string }).updated_at ?? pr.created_at,
+              updatedBy: updater ?? creator,
+              documentUrl: pr.document_url,
+              itemCode: (pr as { item_code?: string | null }).item_code ?? null,
+              duplicateCount: Number((pr as { duplicate_count?: number | null }).duplicate_count ?? 1),
+              poLineSummary,
+              currentStage,
+              createdBy: creator,
+            }
+          : null,
+        project: projectPayload,
+        purchaseOrder: poPayload,
         approvals: enrichedApprovals,
         exceptions: exceptions ?? [],
         auditLogs,

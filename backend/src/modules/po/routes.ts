@@ -3,7 +3,9 @@ import multer from 'multer';
 import { z } from 'zod';
 import { requireAuth } from '../../middleware/auth';
 import { requireRole } from '../../middleware/rbac';
+import { loadEmployeeVisibleProjectIds } from '../projects/projectAccess';
 import { searchPoLinesForProject } from './searchLines';
+import { groupPurchaseOrdersByPo, type PurchaseOrderDbRow } from './groupByPo';
 import { parsePoUploadFile, calcRemainingAmount, type ParsedLineItemRow } from './service';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
@@ -88,6 +90,7 @@ function lineItemToPayload(
     total_value: po_amount,
     remaining_value: remaining_amount,
     uploaded_by: actorUserId,
+    updated_by: actorUserId,
     department,
   };
 
@@ -284,6 +287,7 @@ poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), asyn
             po_number: item.po_number,
             vendor: item.vendorDisplay,
             uploaded_by: actorUserId,
+            updated_by: actorUserId,
           })
           .eq('id', existing.id)
           .select('id')
@@ -301,6 +305,7 @@ poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), asyn
             total_value: item.total_value,
             remaining_value: item.total_value,
             uploaded_by: actorUserId,
+            updated_by: actorUserId,
           })
           .select('id')
           .single();
@@ -347,6 +352,7 @@ poRouter.get('/search', requireRole('admin', 'pm', 'employee'), async (req, res,
       limit,
       actorRole: req.auth!.role,
       actorDepartment: req.auth!.department ?? null,
+      actorUserId: req.auth!.userId,
     });
     res.json({ lines });
   } catch (err) {
@@ -362,21 +368,37 @@ poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res) => {
   let q = supabaseAdmin
     .from('purchase_orders')
     .select(
-      'id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at, po, po_line_sn, item_code, department, po_amount, remaining_amount',
+      'id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at, updated_at, po, po_line_sn, item_code, description, unit_price, line_no, department, po_amount, remaining_amount, issue_date, customer',
     )
     .order('created_at', { ascending: false })
-    .limit(200);
+    .limit(500);
 
   if (actorRole !== 'admin') {
     let fromProjects: string[] = [];
     if (actorDepartment) {
-      const { data: projs, error: pErr } = await supabaseAdmin
-        .from('projects')
-        .select('po_id')
-        .eq('department', actorDepartment)
-        .not('po_id', 'is', null);
-      if (pErr) throw pErr;
-      fromProjects = [...new Set((projs ?? []).map((p) => p.po_id as string).filter(Boolean))];
+      if (actorRole === 'employee') {
+        const visible = await loadEmployeeVisibleProjectIds({
+          userId: actorUserId,
+          department: actorDepartment,
+        });
+        if (visible.length > 0) {
+          const { data: projs, error: pErr } = await supabaseAdmin
+            .from('projects')
+            .select('po_id')
+            .in('id', visible)
+            .not('po_id', 'is', null);
+          if (pErr) throw pErr;
+          fromProjects = [...new Set((projs ?? []).map((p) => p.po_id as string).filter(Boolean))];
+        }
+      } else {
+        const { data: projs, error: pErr } = await supabaseAdmin
+          .from('projects')
+          .select('po_id')
+          .eq('department', actorDepartment)
+          .not('po_id', 'is', null);
+        if (pErr) throw pErr;
+        fromProjects = [...new Set((projs ?? []).map((p) => p.po_id as string).filter(Boolean))];
+      }
     }
     const orParts = [`uploaded_by.eq.${actorUserId}`];
     if (actorDepartment) orParts.push(`department.eq.${actorDepartment}`);
@@ -386,5 +408,7 @@ poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res) => {
 
   const { data, error } = await q;
   if (error) throw error;
-  res.json({ purchaseOrders: data ?? [] });
+  const rows = data ?? [];
+  const purchaseOrders = groupPurchaseOrdersByPo(rows as PurchaseOrderDbRow[]);
+  res.json({ purchaseOrders });
 });

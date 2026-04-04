@@ -2,15 +2,15 @@ import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { writeAuditLog } from '../auditLogs/service';
 import { createInAppNotification, enqueueEmailPlaceholder, getUserEmail } from '../notifications/service';
-import type { ApprovalStageRole } from '../auth/types';
-import { APPROVAL_STAGE_ORDER } from '../auth/types';
+import type { ApprovalStageRole, RequiredApprovalStageRole, UserRole } from '../auth/types';
+import { REQUIRED_APPROVAL_STAGE_ORDER } from '../auth/types';
 import { buildApprovalStagesForProject } from '../org/approvers';
 import { fetchProjectOrThrow } from '../org/projectGuards';
 
 type ApprovalDecision = 'approved' | 'rejected';
 
-export function getApprovalStageOrder(): readonly ApprovalStageRole[] {
-  return APPROVAL_STAGE_ORDER;
+export function getApprovalStageOrder(): readonly RequiredApprovalStageRole[] {
+  return REQUIRED_APPROVAL_STAGE_ORDER;
 }
 
 async function notifyUser(params: { userId: string; type: string; message: string; emailSubject: string }) {
@@ -84,6 +84,7 @@ export async function startApprovalsForPurchaseRequest(prId: string, triggeredBy
     action: 'approvals_started',
     userId: triggeredBy,
     entity: 'purchase_request',
+    entityType: 'purchase_request',
     entityId: pr.id,
   });
 }
@@ -91,134 +92,233 @@ export async function startApprovalsForPurchaseRequest(prId: string, triggeredBy
 function humanizeStageLabel(role: ApprovalStageRole): string {
   if (role === 'team_lead') return 'team lead approval';
   if (role === 'pm') return 'PM approval';
-  return 'admin approval';
+  return 'admin action';
 }
 
-async function loadPrApprovalSequence(projectId: string): Promise<ApprovalStageRole[]> {
-  const project = await fetchProjectOrThrow(projectId);
-  const stages = await buildApprovalStagesForProject(project);
-  return stages.map((s) => s.role);
+/** Required TL/PM rows that exist for this PR, in workflow order (skips missing TL when not created). */
+async function fetchRequiredRolesForRequest(requestId: string): Promise<RequiredApprovalStageRole[]> {
+  const { data, error } = await supabaseAdmin.from('approvals').select('role').eq('request_id', requestId);
+  if (error) throw error;
+  const present = new Set((data ?? []).map((r) => r.role as string));
+  const out: RequiredApprovalStageRole[] = [];
+  for (const role of REQUIRED_APPROVAL_STAGE_ORDER) {
+    if (present.has(role)) out.push(role);
+  }
+  return out;
 }
 
-function rolesAreFullyApproved(params: { requestId: string; roles: ApprovalStageRole[] }) {
+function rolesRequiredAreFullyApproved(params: { requestId: string; roles: readonly RequiredApprovalStageRole[] }) {
   return supabaseAdmin
     .from('approvals')
     .select('role, status')
     .eq('request_id', params.requestId)
-    .in('role', params.roles)
+    .in('role', [...params.roles])
     .then(({ data, error }) => {
       if (error) throw error;
-      const byRole = new Map((data ?? []).map((r) => [r.role as ApprovalStageRole, r.status]));
+      const byRole = new Map((data ?? []).map((r) => [r.role as RequiredApprovalStageRole, r.status]));
       return params.roles.every((r) => byRole.get(r) === 'approved');
     });
 }
 
-async function applyBudgetDecrementForApprovedPr(
-  pr: {
-    id: string;
-    amount: number | string;
-    project_id: string;
-    created_by: string;
-    po_line_id?: string | null;
-  },
-  actorUserId: string,
-) {
-  const lineId = pr.po_line_id ?? null;
-  if (lineId) {
-    const { data: lineRow, error: lineErr } = await supabaseAdmin
-      .from('purchase_orders')
-      .select('id, remaining_amount, remaining_value')
-      .eq('id', lineId)
-      .single();
-    if (lineErr || !lineRow) throw lineErr ?? new AppError('PO line not found', 404);
+function mapFinalizePrRpcError(err: unknown): AppError {
+  const raw = err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : String(err);
+  const msg = raw.toLowerCase();
+  if (msg.includes('insufficient_po_line_balance')) {
+    return new AppError('Insufficient remaining balance on PO line for approval', 409);
+  }
+  if (msg.includes('insufficient_po_remaining_value') || msg.includes('insufficient_po_remaining_amount')) {
+    return new AppError('Insufficient PO remaining balance for approval', 409);
+  }
+  if (msg.includes('insufficient_project_budget')) {
+    return new AppError('Insufficient project budget for approval', 409);
+  }
+  if (msg.includes('pr_approvals_still_pending')) {
+    return new AppError('Cannot apply budget while Team Lead or PM approvals are still pending', 409);
+  }
+  if (msg.includes('pr_not_pending')) {
+    return new AppError('Purchase request is not in a state that allows budget finalization', 409);
+  }
+  if (msg.includes('pr_budget_already_deducted')) {
+    return new AppError('Budget was already applied for this purchase request', 409);
+  }
+  return new AppError(raw || 'Failed to finalize purchase request and deduct budget', 500);
+}
 
-    if (Number(lineRow.remaining_value) < Number(pr.amount) || Number(lineRow.remaining_amount) < Number(pr.amount)) {
-      await supabaseAdmin.from('purchase_requests').update({ status: 'rejected' }).eq('id', pr.id);
-      await supabaseAdmin
-        .from('approvals')
-        .update({ status: 'rejected', comments: 'Auto-rejected due to insufficient remaining PO line balance' })
-        .eq('request_id', pr.id)
-        .eq('status', 'pending');
-      await writeAuditLog({
-        action: 'pr_rejected_insufficient_po_line_balance',
-        userId: actorUserId,
-        entity: 'purchase_request',
-        entityId: pr.id,
-      });
-      throw new AppError('Insufficient remaining balance on PO line for approval', 409);
-    }
+/**
+ * Atomically (single DB transaction): validate all stages approved, deduct PO line / PO / project budget,
+ * set PR to approved and budget_deducted. Idempotent if already approved with budget_deducted.
+ */
+async function finalizePrBudgetAfterApprovalRpc(prId: string, actorUserId: string): Promise<Record<string, unknown>> {
+  const { data, error } = await supabaseAdmin.rpc('finalize_pr_budget_after_approval', {
+    p_pr_id: prId,
+    p_updated_by: actorUserId,
+  });
+  if (error) throw mapFinalizePrRpcError(error);
+  return (data as Record<string, unknown>) ?? {};
+}
 
-    const nextRem = Number(lineRow.remaining_amount) - Number(pr.amount);
-    const nextVal = Number(lineRow.remaining_value) - Number(pr.amount);
-    const { error: lineDecErr } = await supabaseAdmin
-      .from('purchase_orders')
-      .update({ remaining_amount: nextRem, remaining_value: nextVal })
-      .eq('id', lineId);
-    if (lineDecErr) throw lineDecErr;
-    return;
+function auditPayloadPreview(payload: Record<string, unknown>, maxLen = 2000): string {
+  try {
+    const s = JSON.stringify(payload);
+    return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
+  } catch {
+    return '';
+  }
+}
+
+async function performAdminForceApprove(params: {
+  pr: { id: string; created_by: string; duplicate_count: number | null; status: string };
+  actorUserId: string;
+  comments: string | null;
+  touchedApprovalId: string;
+}): Promise<{ prId: string; status: 'approved'; approval: Record<string, unknown> }> {
+  const { pr, actorUserId, comments, touchedApprovalId } = params;
+  if (pr.status !== 'pending' && pr.status !== 'pending_exception') {
+    throw new AppError(`PR is not in a state that allows force approval (status=${pr.status})`, 409);
   }
 
-  const projectId = pr.project_id;
-  const { data: projectRow, error: projRowErr } = await supabaseAdmin
-    .from('projects')
-    .select('id, po_id, budget')
-    .eq('id', projectId)
+  const { data: pendingRows, error: pendErr } = await supabaseAdmin
+    .from('approvals')
+    .select('id')
+    .eq('request_id', pr.id)
+    .eq('status', 'pending');
+  if (pendErr) throw pendErr;
+  const pendingIds = (pendingRows ?? []).map((r) => r.id as string);
+
+  const dupCount = Number(pr.duplicate_count ?? 1);
+  const duplicatePrefix =
+    dupCount > 1 ? `This item has been requested ${dupCount} times by the same user.` : null;
+  const userPart = comments?.trim() ?? '';
+  const mergedComments =
+    [duplicatePrefix, userPart, 'Administrator force-approved pending stages.'].filter(Boolean).join('\n\n') || null;
+
+  if (pendingIds.length > 0) {
+    const { error: upErr } = await supabaseAdmin
+      .from('approvals')
+      .update({
+        status: 'approved',
+        comments: mergedComments,
+        updated_by: actorUserId,
+        is_admin_override: true,
+      })
+      .in('id', pendingIds);
+    if (upErr) throw upErr;
+  }
+
+  let rpcResult: Record<string, unknown> = {};
+  try {
+    rpcResult = await finalizePrBudgetAfterApprovalRpc(pr.id, actorUserId);
+  } catch (e) {
+    if (pendingIds.length > 0) {
+      await supabaseAdmin
+        .from('approvals')
+        .update({ status: 'pending', is_admin_override: false, updated_by: actorUserId })
+        .in('id', pendingIds);
+    }
+    throw e;
+  }
+
+  const { data: updatedApproval, error: selErr } = await supabaseAdmin
+    .from('approvals')
+    .select('id, request_id, approver_id, role, status, comments, created_at, is_admin_override')
+    .eq('id', touchedApprovalId)
     .single();
-  if (projRowErr || !projectRow) throw projRowErr ?? new AppError('Project not found', 404);
-  const poId = projectRow.po_id ?? null;
+  if (selErr || !updatedApproval) throw selErr ?? new AppError('Approval row not found after force approve', 500);
 
-  if (poId) {
-    const { data: poRow, error: poErr } = await supabaseAdmin
-      .from('purchase_orders')
-      .select('id, remaining_value')
-      .eq('id', poId)
-      .single();
-    if (poErr || !poRow) throw poErr ?? new AppError('PO not found', 404);
+  await notifyUser({
+    userId: pr.created_by,
+    type: 'pr_approved',
+    message: `Purchase Request ${pr.id} was fully approved (administrator force approve).`,
+    emailSubject: 'PR Approved',
+  });
 
-    if (Number(poRow.remaining_value) < Number(pr.amount)) {
-      await supabaseAdmin.from('purchase_requests').update({ status: 'rejected' }).eq('id', pr.id);
-      await supabaseAdmin
-        .from('approvals')
-        .update({ status: 'rejected', comments: 'Auto-rejected due to insufficient remaining PO balance' })
-        .eq('request_id', pr.id)
-        .eq('status', 'pending');
-      await writeAuditLog({
-        action: 'pr_rejected_insufficient_po_balance',
-        userId: actorUserId,
-        entity: 'purchase_request',
-        entityId: pr.id,
-      });
-      throw new AppError('Insufficient PO remaining value for approval', 409);
-    }
+  await writeAuditLog({
+    action: 'admin_force_approve',
+    userId: actorUserId,
+    entity: 'purchase_request',
+    entityType: 'purchase_request',
+    entityId: pr.id,
+    reason: auditPayloadPreview({ finalize: rpcResult }),
+    changes: { via: 'admin_force_approve', finalize: rpcResult },
+  });
 
-    const { error: decErr } = await supabaseAdmin
-      .from('purchase_orders')
-      .update({ remaining_value: Number(poRow.remaining_value) - Number(pr.amount) })
-      .eq('id', poId);
-    if (decErr) throw decErr;
-  } else {
-    if (Number(projectRow.budget) < Number(pr.amount)) {
-      await supabaseAdmin.from('purchase_requests').update({ status: 'rejected' }).eq('id', pr.id);
-      await supabaseAdmin
-        .from('approvals')
-        .update({ status: 'rejected', comments: 'Auto-rejected due to insufficient remaining budget' })
-        .eq('request_id', pr.id)
-        .eq('status', 'pending');
-      await writeAuditLog({
-        action: 'pr_rejected_insufficient_budget',
-        userId: actorUserId,
-        entity: 'purchase_request',
-        entityId: pr.id,
-      });
-      throw new AppError('Insufficient remaining budget for approval', 409);
-    }
+  await writeAuditLog({
+    action: 'budget_deducted_after_pr_approval',
+    userId: actorUserId,
+    entity: 'purchase_request',
+    entityType: 'purchase_request',
+    entityId: pr.id,
+    reason: auditPayloadPreview({ ...rpcResult, via: 'admin_force_approve' }),
+    changes: { finalize: rpcResult },
+  });
 
-    const { error: decErr } = await supabaseAdmin
-      .from('projects')
-      .update({ budget: Number(projectRow.budget) - Number(pr.amount) })
-      .eq('id', projectId);
-    if (decErr) throw decErr;
+  await writeAuditLog({
+    action: 'pr_approved',
+    userId: actorUserId,
+    entity: 'purchase_request',
+    entityType: 'purchase_request',
+    entityId: pr.id,
+    changes: { status: { after: 'approved' }, via: 'admin_force_approve' },
+  });
+
+  return { prId: pr.id, status: 'approved', approval: updatedApproval as Record<string, unknown> };
+}
+
+async function performAdminRejectEntirePr(params: {
+  pr: { id: string; created_by: string; status: string };
+  actorUserId: string;
+  reason: string;
+}): Promise<{ prId: string; status: 'rejected'; approval: null }> {
+  const { pr, actorUserId, reason } = params;
+  if (pr.status !== 'pending' && pr.status !== 'pending_exception') {
+    throw new AppError(`PR is not rejectable (status=${pr.status})`, 409);
   }
+
+  const { data: pendingRows, error } = await supabaseAdmin
+    .from('approvals')
+    .select('id')
+    .eq('request_id', pr.id)
+    .eq('status', 'pending');
+  if (error) throw error;
+  const pendingIds = (pendingRows ?? []).map((r) => r.id as string);
+  const comment = `Administrator rejected entire request. ${reason}`.trim();
+
+  const { error: prRej } = await supabaseAdmin
+    .from('purchase_requests')
+    .update({ status: 'rejected', updated_by: actorUserId })
+    .eq('id', pr.id);
+  if (prRej) throw prRej;
+
+  if (pendingIds.length > 0) {
+    const { error: apRej } = await supabaseAdmin
+      .from('approvals')
+      .update({
+        status: 'rejected',
+        comments: comment,
+        updated_by: actorUserId,
+        is_admin_override: true,
+      })
+      .in('id', pendingIds);
+    if (apRej) throw apRej;
+  }
+
+  await notifyUser({
+    userId: pr.created_by,
+    type: 'pr_rejected',
+    message: `Purchase Request ${pr.id} was rejected by an administrator.`,
+    emailSubject: 'PR Rejected',
+  });
+
+  await writeAuditLog({
+    action: 'pr_rejected',
+    userId: actorUserId,
+    entity: 'purchase_request',
+    entityType: 'purchase_request',
+    entityId: pr.id,
+    changes: { status: { after: 'rejected' }, via: 'admin_reject_entire_pr' },
+  });
+
+  return { prId: pr.id, status: 'rejected', approval: null };
 }
 
 export async function decideApproval(params: {
@@ -226,8 +326,9 @@ export async function decideApproval(params: {
   decision: ApprovalDecision;
   comments?: string | null;
   actorUserId: string;
+  actorRole: UserRole;
 }) {
-  const { approvalId, decision, comments, actorUserId } = params;
+  const { approvalId, decision, comments, actorUserId, actorRole } = params;
   const decisionNormalized = decision === 'approved' ? 'approved' : 'rejected';
 
   const { data: approval, error: apprErr } = await supabaseAdmin
@@ -237,12 +338,11 @@ export async function decideApproval(params: {
     .single();
   if (apprErr || !approval) throw apprErr ?? new AppError('Approval not found', 404);
 
-  if (approval.approver_id !== actorUserId) throw new AppError('Not authorized for this approval record', 403);
   if (approval.status !== 'pending') throw new AppError(`Approval already decided (status=${approval.status})`, 409);
 
   const { data: pr, error: prErr } = await supabaseAdmin
     .from('purchase_requests')
-    .select('id, amount, project_id, created_by, status, duplicate_count, po_line_id')
+    .select('id, amount, project_id, created_by, status, duplicate_count, po_line_id, budget_deducted')
     .eq('id', approval.request_id)
     .single();
   if (prErr || !pr) throw prErr ?? new AppError('Purchase request not found', 404);
@@ -251,13 +351,53 @@ export async function decideApproval(params: {
     throw new AppError(`PR is not in a deciable state (status=${pr.status})`, 409);
   }
 
-  const roleSequence = await loadPrApprovalSequence(pr.project_id as string);
-  if (!roleSequence.includes(approval.role as ApprovalStageRole)) {
-    throw new AppError('Approval role not part of expected sequence', 400);
+  if (actorRole === 'admin' && decisionNormalized === 'rejected') {
+    return performAdminRejectEntirePr({
+      pr: {
+        id: pr.id as string,
+        created_by: pr.created_by as string,
+        status: pr.status as string,
+      },
+      actorUserId,
+      reason: comments?.trim() || 'No reason provided.',
+    });
   }
 
-  const currentIndex = roleSequence.indexOf(approval.role as ApprovalStageRole);
-  const previousRoles = roleSequence.slice(0, currentIndex);
+  if (actorRole === 'admin' && decisionNormalized === 'approved') {
+    const isAssignee = approval.approver_id === actorUserId;
+    const useForcePath = !isAssignee || approval.role === 'admin';
+    if (useForcePath) {
+      return performAdminForceApprove({
+        pr: {
+          id: pr.id as string,
+          created_by: pr.created_by as string,
+          duplicate_count: pr.duplicate_count as number | null,
+          status: pr.status as string,
+        },
+        actorUserId,
+        comments: comments ?? null,
+        touchedApprovalId: approval.id as string,
+      });
+    }
+  }
+
+  if (approval.approver_id !== actorUserId) throw new AppError('Not authorized for this approval record', 403);
+
+  if (approval.role === 'admin') {
+    throw new AppError(
+      'This approval record is a legacy admin stage and is not part of the required chain. Use Override approval or Force approve.',
+      400,
+    );
+  }
+
+  const requiredRoles = await fetchRequiredRolesForRequest(pr.id as string);
+  const stageRole = approval.role as RequiredApprovalStageRole;
+  if (!requiredRoles.includes(stageRole)) {
+    throw new AppError('Approval role not part of required sequence for this request', 400);
+  }
+
+  const currentIndex = requiredRoles.indexOf(stageRole);
+  const previousRoles = requiredRoles.slice(0, currentIndex);
   if (previousRoles.length > 0) {
     const { data: prevApprovals, error: prevErr } = await supabaseAdmin
       .from('approvals')
@@ -265,7 +405,7 @@ export async function decideApproval(params: {
       .eq('request_id', pr.id)
       .in('role', previousRoles);
     if (prevErr) throw prevErr;
-    const prevMap = new Map((prevApprovals ?? []).map((r) => [r.role as ApprovalStageRole, r.status]));
+    const prevMap = new Map((prevApprovals ?? []).map((r) => [r.role as RequiredApprovalStageRole, r.status]));
     const allApproved = previousRoles.every((r) => prevMap.get(r) === 'approved');
     if (!allApproved) throw new AppError('Cannot decide before previous stages are approved', 409);
   }
@@ -281,23 +421,31 @@ export async function decideApproval(params: {
     .update({
       status: decisionNormalized,
       comments: mergedComments,
+      updated_by: actorUserId,
+      is_admin_override: false,
     })
-    .eq('request_id', approval.request_id)
-    .eq('approver_id', actorUserId)
+    .eq('id', approval.id)
     .eq('status', 'pending')
-    .select('id, request_id, approver_id, role, status, comments, created_at');
+    .select('id, request_id, approver_id, role, status, comments, created_at, is_admin_override');
   if (updErr) throw updErr;
   const rowsAffected = updatedApprovals?.length ?? 0;
   if (rowsAffected === 0) throw new AppError('No matching approval found for this user', 404);
   const updatedApproval = updatedApprovals![0];
 
   if (decisionNormalized === 'rejected') {
-    const { error: prRejErr } = await supabaseAdmin.from('purchase_requests').update({ status: 'rejected' }).eq('id', pr.id);
+    const { error: prRejErr } = await supabaseAdmin
+      .from('purchase_requests')
+      .update({ status: 'rejected', updated_by: actorUserId })
+      .eq('id', pr.id);
     if (prRejErr) throw prRejErr;
 
     await supabaseAdmin
       .from('approvals')
-      .update({ status: 'rejected', comments: 'Auto-rejected due to earlier rejection' })
+      .update({
+        status: 'rejected',
+        comments: 'Auto-rejected due to earlier rejection',
+        updated_by: actorUserId,
+      })
       .eq('request_id', pr.id)
       .eq('status', 'pending');
 
@@ -312,15 +460,17 @@ export async function decideApproval(params: {
       action: 'pr_rejected',
       userId: actorUserId,
       entity: 'purchase_request',
+      entityType: 'purchase_request',
       entityId: pr.id,
+      changes: { status: { after: 'rejected' }, stage: approval.role },
     });
 
     return { prId: pr.id, status: 'rejected' as const, approval: updatedApproval };
   }
 
-  const fullyApproved = await rolesAreFullyApproved({ requestId: pr.id, roles: roleSequence });
+  const fullyApproved = await rolesRequiredAreFullyApproved({ requestId: pr.id as string, roles: requiredRoles });
   if (!fullyApproved) {
-    const nextRole = roleSequence[currentIndex + 1];
+    const nextRole = requiredRoles[currentIndex + 1];
     if (!nextRole) throw new AppError('Next role not found', 500);
 
     const { data: nextApproval, error: nextErr } = await supabaseAdmin
@@ -334,7 +484,7 @@ export async function decideApproval(params: {
     await notifyUser({
       userId: nextApproval.approver_id,
       type: 'pr_approval_pending',
-      message: `Purchase Request ${pr.id} is ready for your ${humanizeStageLabel(nextRole)}.`,
+      message: `Purchase Request ${pr.id} is ready for your ${humanizeStageLabel(nextRole as ApprovalStageRole)}.`,
       emailSubject: 'PR Approval Pending',
     });
 
@@ -342,25 +492,24 @@ export async function decideApproval(params: {
       action: 'approval_stage_approved',
       userId: actorUserId,
       entity: 'purchase_request',
+      entityType: 'purchase_request',
       entityId: pr.id,
+      changes: { stage: approval.role, approvalStatus: { after: 'approved' } },
     });
 
     return { prId: pr.id, status: 'pending' as const, approval: updatedApproval };
   }
 
-  await applyBudgetDecrementForApprovedPr(
-    {
-      id: pr.id,
-      amount: pr.amount,
-      project_id: pr.project_id as string,
-      created_by: pr.created_by,
-      po_line_id: (pr as { po_line_id?: string | null }).po_line_id ?? null,
-    },
-    actorUserId,
-  );
-
-  const { error: prOkErr } = await supabaseAdmin.from('purchase_requests').update({ status: 'approved' }).eq('id', pr.id);
-  if (prOkErr) throw prOkErr;
+  let rpcResult: Record<string, unknown> = {};
+  try {
+    rpcResult = await finalizePrBudgetAfterApprovalRpc(pr.id as string, actorUserId);
+  } catch (e) {
+    await supabaseAdmin
+      .from('approvals')
+      .update({ status: 'pending', updated_by: actorUserId })
+      .eq('id', approval.id);
+    throw e;
+  }
 
   await notifyUser({
     userId: pr.created_by,
@@ -370,10 +519,22 @@ export async function decideApproval(params: {
   });
 
   await writeAuditLog({
+    action: 'budget_deducted_after_pr_approval',
+    userId: actorUserId,
+    entity: 'purchase_request',
+    entityType: 'purchase_request',
+    entityId: pr.id,
+    reason: auditPayloadPreview(rpcResult),
+    changes: { finalize: rpcResult },
+  });
+
+  await writeAuditLog({
     action: 'pr_approved',
     userId: actorUserId,
     entity: 'purchase_request',
+    entityType: 'purchase_request',
     entityId: pr.id,
+    changes: { status: { after: 'approved' } },
   });
 
   return { prId: pr.id, status: 'approved' as const, approval: updatedApproval };
@@ -390,48 +551,101 @@ export async function adminOverridePurchaseRequest(params: {
 
   const { data: pr, error: prErr } = await supabaseAdmin
     .from('purchase_requests')
-    .select('id, status, created_by, amount, project_id, po_line_id')
+    .select('id, status, created_by, amount, project_id, po_line_id, budget_deducted')
     .eq('id', requestId)
     .single();
   if (prErr || !pr) throw prErr ?? new AppError('Purchase request not found', 404);
 
   if (decisionNormalized === 'rejected') {
-    const { error: prRejErr } = await supabaseAdmin.from('purchase_requests').update({ status: 'rejected' }).eq('id', pr.id);
+    const { data: pendingRejectIds, error: pendRejErr } = await supabaseAdmin
+      .from('approvals')
+      .select('id')
+      .eq('request_id', pr.id)
+      .eq('status', 'pending');
+    if (pendRejErr) throw pendRejErr;
+    const rejIds = (pendingRejectIds ?? []).map((r) => r.id as string);
+
+    const { error: prRejErr } = await supabaseAdmin
+      .from('purchase_requests')
+      .update({ status: 'rejected', updated_by: actorUserId })
+      .eq('id', pr.id);
     if (prRejErr) throw prRejErr;
 
-    const { error: approvalsCloseErr } = await supabaseAdmin
-      .from('approvals')
-      .update({
-        status: 'rejected',
-        comments: `Admin override rejected. Reason: ${reason}`,
-      })
-      .eq('request_id', pr.id)
-      .eq('status', 'pending');
-    if (approvalsCloseErr) throw approvalsCloseErr;
+    if (rejIds.length > 0) {
+      const { error: approvalsCloseErr } = await supabaseAdmin
+        .from('approvals')
+        .update({
+          status: 'rejected',
+          comments: `Admin override rejected. Reason: ${reason}`,
+          updated_by: actorUserId,
+          is_admin_override: true,
+        })
+        .in('id', rejIds);
+      if (approvalsCloseErr) throw approvalsCloseErr;
+    }
   } else {
-    await applyBudgetDecrementForApprovedPr(
-      {
-        id: pr.id,
-        amount: pr.amount,
-        project_id: pr.project_id as string,
-        created_by: pr.created_by,
-        po_line_id: (pr as { po_line_id?: string | null }).po_line_id ?? null,
-      },
-      actorUserId,
-    );
+    if (pr.status === 'approved' && pr.budget_deducted) {
+      const { data: updatedPr, error: updatedPrErr } = await supabaseAdmin
+        .from('purchase_requests')
+        .select('id, status, created_by')
+        .eq('id', pr.id)
+        .single();
+      if (updatedPrErr || !updatedPr) throw updatedPrErr ?? new AppError('Updated purchase request not found', 500);
+      await writeAuditLog({
+        action: 'admin_override',
+        userId: actorUserId,
+        entity: 'purchase_request',
+        entityType: 'purchase_request',
+        entityId: pr.id,
+        reason: `${reason} (no-op: already approved and budget applied)`,
+      });
+      return { prId: updatedPr.id, status: updatedPr.status, reason };
+    }
 
-    const { error: prOkErr } = await supabaseAdmin.from('purchase_requests').update({ status: 'approved' }).eq('id', pr.id);
-    if (prOkErr) throw prOkErr;
-
-    const { error: approvalsSkipErr } = await supabaseAdmin
+    const { data: pendingApproveIds, error: pendApprErr } = await supabaseAdmin
       .from('approvals')
-      .update({
-        status: 'approved',
-        comments: `Admin override approved. Reason: ${reason}`,
-      })
+      .select('id')
       .eq('request_id', pr.id)
       .eq('status', 'pending');
-    if (approvalsSkipErr) throw approvalsSkipErr;
+    if (pendApprErr) throw pendApprErr;
+    const approveIds = (pendingApproveIds ?? []).map((r) => r.id as string);
+
+    const overrideComment = `Admin override approved. Reason: ${reason}`;
+    if (approveIds.length > 0) {
+      const { error: approvalsSkipErr } = await supabaseAdmin
+        .from('approvals')
+        .update({
+          status: 'approved',
+          comments: overrideComment,
+          updated_by: actorUserId,
+          is_admin_override: true,
+        })
+        .in('id', approveIds);
+      if (approvalsSkipErr) throw approvalsSkipErr;
+    }
+
+    let rpcResult: Record<string, unknown> = {};
+    try {
+      rpcResult = await finalizePrBudgetAfterApprovalRpc(pr.id, actorUserId);
+    } catch (e) {
+      if (approveIds.length > 0) {
+        await supabaseAdmin
+          .from('approvals')
+          .update({ status: 'pending', is_admin_override: false, updated_by: actorUserId })
+          .in('id', approveIds);
+      }
+      throw e;
+    }
+
+    await writeAuditLog({
+      action: 'budget_deducted_after_pr_approval',
+      userId: actorUserId,
+      entity: 'purchase_request',
+      entityType: 'purchase_request',
+      entityId: pr.id,
+      reason: auditPayloadPreview({ ...rpcResult, via: 'admin_override' }),
+      changes: { via: 'admin_override', finalize: rpcResult },
+    });
   }
 
   const { data: updatedPr, error: updatedPrErr } = await supabaseAdmin
@@ -445,6 +659,7 @@ export async function adminOverridePurchaseRequest(params: {
     action: 'admin_override',
     userId: actorUserId,
     entity: 'purchase_request',
+    entityType: 'purchase_request',
     entityId: pr.id,
     reason,
   });

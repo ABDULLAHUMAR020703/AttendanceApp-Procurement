@@ -6,6 +6,8 @@ export type ProjectRow = {
   id: string;
   department: string;
   team_lead_id: string | null;
+  /** Responsible PM for approval chain; may be null before DB migration backfill. */
+  pm_id: string | null;
   created_by: string;
   status: string;
 };
@@ -17,7 +19,7 @@ export function isTeamLeadOnProject(params: { projectTeamLeadId: string | null; 
 export async function fetchProjectOrThrow(projectId: string): Promise<ProjectRow> {
   const { data: project, error } = await supabaseAdmin
     .from('projects')
-    .select('id, department, team_lead_id, created_by, status')
+    .select('id, department, team_lead_id, pm_id, created_by, status')
     .eq('id', projectId)
     .single();
   if (error || !project) throw error ?? new AppError('Project not found', 404);

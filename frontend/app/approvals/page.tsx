@@ -13,10 +13,15 @@ import { useAuth } from '../../features/auth/AuthProvider';
 import { PrPoLineMetricsCells, type PoLineSummary } from '../../components/PrPoLineMetricsCells';
 import { authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 import { useState } from 'react';
-import { APPROVAL_STAGE_ORDER, approvalStageLabel, approvalPipelineStatus } from '../../lib/org';
+import {
+  approvalPipelineStatus,
+  approvalStageLabel,
+  sortApprovalStageIndex,
+} from '../../lib/org';
 
 type PurchaseRequestMeta = {
   id: string;
+  status: string;
   item_code: string | null;
   duplicate_count: number;
   po_line_summary?: PoLineSummary | null;
@@ -30,6 +35,7 @@ type Approval = {
   status: string;
   comments: string | null;
   created_at: string;
+  is_admin_override?: boolean | null;
   purchase_request?: PurchaseRequestMeta | null;
 };
 
@@ -45,11 +51,6 @@ function duplicateRequestBannerClass(dc: number): string {
   if (dc === 3) return 'border border-orange-500/40 bg-orange-950/35 text-orange-100';
   if (dc === 2) return 'border border-amber-400/40 bg-amber-950/30 text-amber-100';
   return '';
-}
-
-function orderIndex(role: string) {
-  const idx = APPROVAL_STAGE_ORDER.indexOf(role as (typeof APPROVAL_STAGE_ORDER)[number]);
-  return idx === -1 ? Number.MAX_SAFE_INTEGER : idx;
 }
 
 export default function ApprovalsPage() {
@@ -84,7 +85,7 @@ export default function ApprovalsPage() {
     queryFn: async () => {
       const { data: rows, error } = await supabase!
         .from('approvals')
-        .select('id, request_id, approver_id, role, status, comments, created_at')
+        .select('id, request_id, approver_id, role, status, comments, created_at, is_admin_override')
         .in('request_id', uniqueRequestIds);
       if (error) throw error;
       const grouped: Record<string, Approval[]> = {};
@@ -93,7 +94,7 @@ export default function ApprovalsPage() {
         grouped[row.request_id].push(row);
       }
       for (const key of Object.keys(grouped)) {
-        grouped[key].sort((a, b) => orderIndex(a.role) - orderIndex(b.role));
+        grouped[key].sort((a, b) => sortApprovalStageIndex(a.role) - sortApprovalStageIndex(b.role));
       }
       return grouped;
     },
@@ -196,8 +197,18 @@ export default function ApprovalsPage() {
               <Card key={a.id} className={`p-4 space-y-3 ${dupFrame}`.trim()}>
                 {(() => {
                   const chain = approvalsByRequest?.[a.request_id] ?? [a];
-                  const currentStep = chain.find((step) => step.status === 'pending');
+                  const requiredChain = chain
+                    .filter((step) => step.role === 'team_lead' || step.role === 'pm')
+                    .sort((x, y) => sortApprovalStageIndex(x.role) - sortApprovalStageIndex(y.role));
+                  const legacyAdminRows = chain.filter((step) => step.role === 'admin');
+                  const currentStep = requiredChain.find((step) => step.status === 'pending');
                   const canDecide = a.status === 'pending' && !!currentStep && currentStep.id === a.id;
+                  const prStatus = a.purchase_request?.status ?? '';
+                  const canForceApprove =
+                    isAdmin &&
+                    (prStatus === 'pending' || prStatus === 'pending_exception') &&
+                    requiredChain.some((s) => s.status === 'pending');
+                  const forceTargetId = requiredChain.find((s) => s.status === 'pending')?.id;
 
                   return (
                     <>
@@ -233,19 +244,31 @@ export default function ApprovalsPage() {
                         </TableWrapper>
                       </div>
                       <div className="rounded-lg border border-white/10 bg-[#2a2640]/60 p-3">
-                        <div className="text-xs text-muted-foreground mb-2">Approval flow</div>
+                        <div className="text-xs text-muted-foreground mb-2">Required approval chain (Team Lead → PM)</div>
                         <div className="flex flex-wrap items-center gap-2 text-xs">
-                          {chain.map((step) => {
+                          {requiredChain.map((step) => {
                             const isCurrent = currentStep?.id === step.id;
                             const indicator = step.status === 'approved' ? '✅' : isCurrent ? '🔵' : '⏳';
+                            const overrideNote = step.is_admin_override ? ' · override' : '';
                             return (
                               <span key={step.id} className="inline-flex items-center gap-1 rounded border border-white/10 px-2 py-1">
                                 <span>{indicator}</span>
-                                <span title={step.role}>{approvalStageLabel(step.role)}</span>
+                                <span title={step.role}>
+                                  {approvalStageLabel(step.role)}
+                                  {overrideNote ? <span className="text-amber-200/90">{overrideNote}</span> : null}
+                                </span>
                               </span>
                             );
                           })}
                         </div>
+                        {legacyAdminRows.length > 0 ? (
+                          <div className="mt-2 text-[11px] text-muted-foreground border-t border-white/5 pt-2">
+                            Legacy admin records (informational, not required):{' '}
+                            {legacyAdminRows
+                              .map((r) => `${approvalStageLabel('admin', { legacyAdmin: true })}: ${r.status}`)
+                              .join(' · ')}
+                          </div>
+                        ) : null}
                         {!canDecide && currentStep ? (
                           <div className="mt-2 text-xs text-amber-200">
                             {approvalPipelineStatus(currentStep.role, currentStep.status)}
@@ -253,7 +276,7 @@ export default function ApprovalsPage() {
                         ) : null}
                       </div>
 
-                      <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-start justify-between gap-4 flex-wrap">
                         <div className="space-y-1">
                           <div className="text-sm text-muted-foreground">
                             Request:{' '}
@@ -267,19 +290,37 @@ export default function ApprovalsPage() {
                           </div>
                           <div className="text-sm text-muted-foreground">Stage: {approvalStageLabel(a.role)}</div>
                           <div className="text-sm text-muted-foreground">Status: {a.status}</div>
+                          {a.is_admin_override ? (
+                            <div className="text-xs text-amber-200/90">This row was decided via an administrator action.</div>
+                          ) : null}
                         </div>
                         {isAdmin ? (
-                          <Button
-                            variant="secondary"
-                            type="button"
-                            onClick={() => {
-                              setOverrideTarget(a.request_id);
-                              setOverrideReason('');
-                              setOverrideDecision('approved');
-                            }}
-                          >
-                            Override
-                          </Button>
+                          <div className="flex flex-wrap gap-2 justify-end">
+                            <Button
+                              variant="secondary"
+                              type="button"
+                              onClick={() => {
+                                setOverrideTarget(a.request_id);
+                                setOverrideReason('');
+                                setOverrideDecision('approved');
+                              }}
+                            >
+                              Override approval
+                            </Button>
+                            <Button
+                              variant="success"
+                              type="button"
+                              disabled={!canForceApprove || !forceTargetId || decisionMutation.isPending}
+                              onClick={() => {
+                                if (forceTargetId) {
+                                  decisionMutation.mutate({ approvalId: forceTargetId, decision: 'approved' });
+                                }
+                              }}
+                              title="Approve all pending stages and finalize immediately (admin only)"
+                            >
+                              Force approve
+                            </Button>
+                          </div>
                         ) : null}
                       </div>
 
@@ -326,8 +367,10 @@ export default function ApprovalsPage() {
         {overrideTarget && isAdmin ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
             <Card className="max-w-md w-full p-6 space-y-4 border border-white/15 shadow-xl">
-              <h3 className="text-lg font-medium">Admin Override</h3>
-              <p className="text-sm text-muted-foreground">Request: {overrideTarget}</p>
+              <h3 className="text-lg font-medium">Override approval</h3>
+              <p className="text-sm text-muted-foreground">
+                Request: {overrideTarget}. A written reason is required for audit.
+              </p>
               <div className="space-y-2">
                 <label className="block text-sm font-medium">Decision</label>
                 <div className="flex gap-2">
@@ -354,7 +397,7 @@ export default function ApprovalsPage() {
                   onChange={(e) => setOverrideReason(e.target.value)}
                   className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
                   rows={4}
-                  placeholder="Enter override reason"
+                  placeholder="Document why this override is appropriate"
                 />
               </div>
               <div className="flex justify-end gap-2">
@@ -373,7 +416,7 @@ export default function ApprovalsPage() {
                     })
                   }
                 >
-                  {overrideMutation.isPending ? 'Applying...' : 'Apply Override'}
+                  {overrideMutation.isPending ? 'Applying...' : 'Apply override'}
                 </Button>
               </div>
             </Card>

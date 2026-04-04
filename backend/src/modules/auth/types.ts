@@ -21,7 +21,13 @@ export type Department =
  */
 export type ApprovalStageRole = 'team_lead' | 'pm' | 'admin';
 
-export const APPROVAL_STAGE_ORDER: ApprovalStageRole[] = ['team_lead', 'pm', 'admin'];
+/** Stages that must be satisfied before budget finalization (PM is final). */
+export type RequiredApprovalStageRole = 'team_lead' | 'pm';
+
+export const REQUIRED_APPROVAL_STAGE_ORDER: readonly RequiredApprovalStageRole[] = ['team_lead', 'pm'];
+
+/** Sort order when displaying rows that may include legacy `admin` records. */
+export const APPROVAL_STAGE_SORT_ORDER: ApprovalStageRole[] = ['team_lead', 'pm', 'admin'];
 
 export const DEPARTMENTS: Department[] = [
   'sales',

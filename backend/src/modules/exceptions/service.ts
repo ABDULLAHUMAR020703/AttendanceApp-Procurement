@@ -95,10 +95,13 @@ export async function decideException(params: {
     throw new AppError('Not authorized to decide this exception', 403);
   }
 
-  const { error: updErr } = await supabaseAdmin.from('exceptions').update({
-    status: decision,
-    approved_by: actorUserId,
-  }).eq('id', exceptionId);
+  const { error: updErr } = await supabaseAdmin
+    .from('exceptions')
+    .update({
+      status: decision,
+      approved_by: actorUserId,
+    })
+    .eq('id', exceptionId);
   if (updErr) throw updErr;
 
   if (exception.type === 'no_po') {
@@ -110,9 +113,13 @@ export async function decideException(params: {
     if (prjErr || !project) throw prjErr ?? new AppError('Referenced project not found', 404);
 
     if (decision === 'approved') {
-      const { error: prjUpErr } = await supabaseAdmin.from('projects').update({
-        status: 'active',
-      }).eq('id', project.id);
+      const { error: prjUpErr } = await supabaseAdmin
+        .from('projects')
+        .update({
+          status: 'active',
+          updated_by: actorUserId,
+        })
+        .eq('id', project.id);
       if (prjUpErr) throw prjUpErr;
 
       await notifyUser({
@@ -129,7 +136,10 @@ export async function decideException(params: {
         entityId: exception.id,
       });
     } else {
-      await supabaseAdmin.from('projects').update({ status: 'rejected' }).eq('id', project.id);
+      await supabaseAdmin
+        .from('projects')
+        .update({ status: 'rejected', updated_by: actorUserId })
+        .eq('id', project.id);
       await notifyUser({
         userId: project.created_by,
         type: 'exception_no_po_rejected',
@@ -156,7 +166,10 @@ export async function decideException(params: {
     if (prErr || !pr) throw prErr ?? new AppError('Referenced purchase request not found', 404);
 
     if (decision === 'approved') {
-      const { error: prUpErr } = await supabaseAdmin.from('purchase_requests').update({ status: 'pending' }).eq('id', pr.id);
+      const { error: prUpErr } = await supabaseAdmin
+        .from('purchase_requests')
+        .update({ status: 'pending', updated_by: actorUserId })
+        .eq('id', pr.id);
       if (prUpErr) throw prUpErr;
 
       await notifyUser({
@@ -175,10 +188,17 @@ export async function decideException(params: {
         entityId: exception.id,
       });
     } else {
-      await supabaseAdmin.from('purchase_requests').update({ status: 'rejected' }).eq('id', pr.id);
+      await supabaseAdmin
+        .from('purchase_requests')
+        .update({ status: 'rejected', updated_by: actorUserId })
+        .eq('id', pr.id);
       await supabaseAdmin
         .from('approvals')
-        .update({ status: 'rejected', comments: 'Auto-rejected due to over-budget exception rejection' })
+        .update({
+          status: 'rejected',
+          comments: 'Auto-rejected due to over-budget exception rejection',
+          updated_by: actorUserId,
+        })
         .eq('request_id', pr.id);
       await notifyUser({
         userId: pr.created_by,

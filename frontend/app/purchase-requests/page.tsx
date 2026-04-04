@@ -15,6 +15,7 @@ import { PrPoLineMetricsCells, type PoLineSummary } from '../../components/PrPoL
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
 import { ApiError, authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../lib/api';
+import { sortApprovalStageIndex } from '../../lib/org';
 
 type ProjectPurchaseOrderSnapshot = { total_value: number; remaining_value: number };
 type Project = {
@@ -140,6 +141,37 @@ export default function PurchaseRequestsPage() {
       }
     },
   });
+
+  const prListIds = useMemo(() => (prData?.purchaseRequests ?? []).map((p) => p.id), [prData]);
+
+  const { data: prApprovalsForAdmin } = useQuery({
+    queryKey: ['approvals', 'admin-pr-force-map', prListIds.join(',')],
+    enabled: isAdmin && !!supabase && prListIds.length > 0,
+    queryFn: async () => {
+      const { data, error } = await supabase!
+        .from('approvals')
+        .select('id, request_id, role, status')
+        .in('request_id', prListIds);
+      if (error) throw error;
+      return (data ?? []) as { id: string; request_id: string; role: string; status: string }[];
+    },
+  });
+
+  const firstPendingRequiredByPr = useMemo(() => {
+    const map = new Map<string, string>();
+    const rows = prApprovalsForAdmin ?? [];
+    for (const prId of prListIds) {
+      const pending = rows.filter(
+        (r) =>
+          r.request_id === prId &&
+          r.status === 'pending' &&
+          (r.role === 'team_lead' || r.role === 'pm'),
+      );
+      pending.sort((a, b) => sortApprovalStageIndex(a.role) - sortApprovalStageIndex(b.role));
+      if (pending[0]) map.set(prId, pending[0].id);
+    }
+    return map;
+  }, [prApprovalsForAdmin, prListIds]);
 
   const projects = useMemo(() => (projectsData?.projects ?? []) as Project[], [projectsData]);
   const selectedProject = useMemo(() => projects.find((p) => p.id === projectId), [projects, projectId]);
@@ -324,6 +356,32 @@ export default function PurchaseRequestsPage() {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
     },
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Override failed'),
+  });
+
+  const forceApproveFromListMutation = useMutation({
+    mutationFn: async (approvalId: string) => {
+      try {
+        return await authedFetchWithSupabase<unknown>(
+          supabase,
+          '/api/approvals/' + approvalId + '/decision',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'approved' }),
+          },
+        );
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['purchase-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['approvals'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    },
+    onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Force approve failed'),
   });
 
   return (
@@ -607,17 +665,39 @@ export default function PurchaseRequestsPage() {
                       </TD>
                       {isAdmin ? (
                         <TD>
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            onClick={() => {
-                              setOverrideTarget(pr.id);
-                              setOverrideDecision('approved');
-                              setOverrideReason('');
-                            }}
-                          >
-                            Override
-                          </Button>
+                          <div className="flex flex-col gap-1 min-w-[9rem]">
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              className="text-xs px-2 py-1"
+                              onClick={() => {
+                                setOverrideTarget(pr.id);
+                                setOverrideDecision('approved');
+                                setOverrideReason('');
+                              }}
+                            >
+                              Override approval
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="success"
+                              className="text-xs px-2 py-1"
+                              disabled={
+                                forceApproveFromListMutation.isPending ||
+                                !(
+                                  (pr.status === 'pending' || pr.status === 'pending_exception') &&
+                                  firstPendingRequiredByPr.get(pr.id)
+                                )
+                              }
+                              title="Finalize immediately (admin only)"
+                              onClick={() => {
+                                const aid = firstPendingRequiredByPr.get(pr.id);
+                                if (aid) forceApproveFromListMutation.mutate(aid);
+                              }}
+                            >
+                              Force approve
+                            </Button>
+                          </div>
                         </TD>
                       ) : null}
                     </TR>
@@ -662,8 +742,10 @@ export default function PurchaseRequestsPage() {
         {overrideTarget && isAdmin ? (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
             <Card className="max-w-md w-full p-6 space-y-4 border border-white/15 shadow-xl">
-              <h3 className="text-lg font-medium">Admin Override</h3>
-              <p className="text-sm text-muted-foreground">Request: {overrideTarget}</p>
+              <h3 className="text-lg font-medium">Override approval</h3>
+              <p className="text-sm text-muted-foreground">
+                Request: {overrideTarget}. A written reason is required for audit.
+              </p>
               <div className="space-y-2">
                 <label className="block text-sm font-medium">Decision</label>
                 <div className="flex gap-2">
@@ -690,7 +772,7 @@ export default function PurchaseRequestsPage() {
                   onChange={(e) => setOverrideReason(e.target.value)}
                   className="w-full rounded-lg border border-white/10 bg-[#2a2640] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-purple-500/70"
                   rows={4}
-                  placeholder="Enter override reason"
+                  placeholder="Document why this override is appropriate"
                 />
               </div>
               <div className="flex justify-end gap-2">
@@ -709,7 +791,7 @@ export default function PurchaseRequestsPage() {
                     })
                   }
                 >
-                  {overrideMutation.isPending ? 'Applying...' : 'Apply Override'}
+                  {overrideMutation.isPending ? 'Applying...' : 'Apply override'}
                 </Button>
               </div>
             </Card>

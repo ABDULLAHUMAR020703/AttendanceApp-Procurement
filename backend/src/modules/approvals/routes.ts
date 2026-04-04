@@ -26,7 +26,7 @@ approvalsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res
     const role = req.auth!.role;
     let q = supabaseAdmin
       .from('approvals')
-      .select('id, request_id, approver_id, role, status, comments, created_at')
+      .select('id, request_id, approver_id, role, status, comments, created_at, is_admin_override')
       .order('created_at', { ascending: false })
       .limit(200);
     if (role !== 'admin') q = q.eq('approver_id', userId);
@@ -38,6 +38,7 @@ approvalsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res
       string,
       {
         id: string;
+        status: string;
         item_code: string | null;
         duplicate_count: number;
         po_line_summary: unknown | null;
@@ -67,6 +68,7 @@ approvalsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res
         const id = p.id as string;
         prMap.set(id, {
           id,
+          status: (p.status as string) ?? 'pending',
           item_code: (p.item_code as string | null) ?? null,
           duplicate_count: Number(p.duplicate_count ?? 1),
           po_line_summary: summaries.get(id) ?? null,
@@ -115,6 +117,7 @@ approvalsRouter.post(
         decision: parsed.decision,
         comments: parsed.comments ?? null,
         actorUserId: req.auth!.userId,
+        actorRole: req.auth!.role,
       });
 
       res.json({ ok: true, result });

@@ -35,9 +35,19 @@ usersRouter.get('/', requireRole('admin', 'pm'), async (req, res, next) => {
         ? req.query.department
         : null;
 
-    let q = supabaseAdmin.from('users').select('id,name,email,role,department,created_at').order('created_at', {
-      ascending: false,
-    });
+    let q = supabaseAdmin
+      .from('users')
+      .select('id,name,email,role,department,job_title,created_at')
+      .order('created_at', {
+        ascending: false,
+      });
+
+    const roleFilterRaw = typeof req.query.role === 'string' ? req.query.role.trim() : '';
+    if (roleFilterRaw) {
+      const parsedRole = RoleSchema.safeParse(roleFilterRaw);
+      if (!parsedRole.success) throw new AppError('Invalid role filter', 400);
+      q = q.eq('role', parsedRole.data);
+    }
 
     if (role === 'pm') {
       const d = req.auth!.department;
@@ -101,7 +111,7 @@ usersRouter.patch('/:id', requireRole('admin'), async (req, res, next) => {
         department: merged.department,
       })
       .eq('id', userId)
-      .select('id,name,email,role,department,created_at')
+      .select('id,name,email,role,department,job_title,created_at')
       .single();
     if (error) throw error;
     res.json({ user: data });

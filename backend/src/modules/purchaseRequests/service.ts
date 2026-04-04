@@ -12,6 +12,7 @@ import {
   sumPendingAmountOnPoLine,
   type PoAnchor,
 } from './poLineContext';
+import { assertActorMaySubmitPurchaseRequestForProject } from '../projects/projectAccess';
 
 export { normalizeItemCode } from '../../utils/itemCode';
 
@@ -63,10 +64,23 @@ export async function createPurchaseRequest(params: {
 
   const { data: project, error: prjErr } = await supabaseAdmin
     .from('projects')
-    .select('id, po_id, budget, status, created_by, department')
+    .select('id, po_id, budget, status, created_by, department, team_lead_id, pm_id')
     .eq('id', projectId)
     .single();
   if (prjErr || !project) throw prjErr ?? new AppError('Project not found', 404);
+  const pmRowId = project.pm_id as string | null;
+  if (!pmRowId) throw new AppError('Project is missing an assigned PM — run migrations or contact admin', 400);
+
+  // PRs always have project_id. Spend is deducted on final approval from: po_line_id row, project.po_id PO header, or project.budget (no PO).
+  if (
+    !project.po_id &&
+    (!Number.isFinite(Number(project.budget)) || Number(project.budget) <= 0)
+  ) {
+    throw new AppError(
+      'Project has no linked purchase order and no usable budget — cannot create a purchase request',
+      400,
+    );
+  }
 
   let anchorPo: PoAnchor | null = null;
   if (project.po_id) {
@@ -78,11 +92,19 @@ export async function createPurchaseRequest(params: {
     if (!aErr && a) anchorPo = a as PoAnchor;
   }
 
-  if (actorRole !== 'admin') {
-    if (!actorDepartment || actorDepartment !== project.department) {
-      throw new AppError('Purchase requests can only be submitted for projects in your department', 403);
-    }
-  }
+  await assertActorMaySubmitPurchaseRequestForProject({
+    project: {
+      id: project.id as string,
+      department: project.department as string,
+      team_lead_id: (project.team_lead_id as string | null) ?? null,
+      pm_id: pmRowId,
+      created_by: project.created_by as string,
+      status: project.status as string,
+    },
+    actorUserId: createdBy,
+    actorRole,
+    actorDepartment: actorDepartment ?? null,
+  });
 
   if (project.status !== 'active') {
     throw new AppError(`Project is not active (status=${project.status}). Submit is blocked until exceptions are approved.`, 409);
@@ -246,7 +268,7 @@ export async function createPurchaseRequest(params: {
   // Within remaining: create PR and start approval workflow
   const { data: pr, error: prInsErr } = await supabaseAdmin
     .from('purchase_requests')
-    .insert({ ...prPayload, status: 'pending' })
+    .insert({ ...prPayload, status: 'pending', updated_by: createdBy })
     .select('id, status, amount, project_id, created_by')
     .single();
   if (prInsErr || !pr) throw prInsErr ?? new AppError('Failed to create purchase request', 500);
@@ -255,7 +277,9 @@ export async function createPurchaseRequest(params: {
     action: 'purchase_request_created',
     userId: createdBy,
     entity: 'purchase_request',
+    entityType: 'purchase_request',
     entityId: pr.id,
+    changes: { amount: reqAmount, project_id: project.id, po_line_id: matchedPoLineId },
   });
 
   await notifyUser({

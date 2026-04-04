@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authRouter } from '../modules/auth/routes';
 import { usersRouter } from '../modules/users/routes';
 import { poRouter } from '../modules/po/routes';
+import { departmentsRouter } from '../modules/departments/routes';
 import { projectsRouter } from '../modules/projects/routes';
 import { purchaseRequestsRouter } from '../modules/purchaseRequests/routes';
 import { approvalsRouter } from '../modules/approvals/routes';
@@ -14,6 +15,7 @@ export const apiRouter = Router();
 
 apiRouter.use('/auth', authRouter);
 apiRouter.use('/users', usersRouter);
+apiRouter.use('/departments', departmentsRouter);
 apiRouter.use('/po', poRouter);
 apiRouter.use('/projects', projectsRouter);
 apiRouter.use('/purchase-requests', purchaseRequestsRouter);
