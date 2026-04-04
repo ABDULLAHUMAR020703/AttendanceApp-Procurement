@@ -1,17 +1,13 @@
 import React from 'react';
 import Link from 'next/link';
+import { BrandLogo } from './BrandLogo';
 
 export default function Header() {
   return (
     <header className="absolute top-0 left-0 w-full flex items-center justify-between px-8 py-6 z-10 text-slate-200">
-      <div className="flex items-center gap-2">
-        <div className="w-8 h-8 rounded-full border border-slate-700 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-          </svg>
-        </div>
+      <BrandLogo size="md">
         <span className="font-bold tracking-widest text-sm uppercase">hadir.ai</span>
-      </div>
+      </BrandLogo>
       
       <nav className="hidden md:flex items-center gap-8 text-xs font-semibold tracking-wider text-slate-400">
         <Link href="/" className="hover:text-white transition-colors">HOME</Link>

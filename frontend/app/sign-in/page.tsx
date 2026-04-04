@@ -7,6 +7,7 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { Input } from '../../components/ui/Input';
 import { useAuth } from '../../features/auth/AuthProvider';
+import { BrandLogo } from '../../components/BrandLogo';
 
 export default function SignInPage() {
   const { signIn, signOut, session, profile } = useAuth();
@@ -38,8 +39,9 @@ export default function SignInPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-[#0f0f1a] px-6 py-8">
       <Card className="w-full max-w-md p-6">
-        <h1 className="text-2xl font-semibold">Sign in</h1>
-        <p className="text-sm text-muted-foreground mt-1">Use your Supabase email/password.</p>
+        <BrandLogo size="lg" className="justify-center mb-4" />
+        <h1 className="text-2xl font-semibold text-center">Sign in</h1>
+        <p className="text-sm text-muted-foreground mt-1 text-center">Use your Supabase email/password.</p>
 
         {session && profile ? (
           <div className="mt-4 rounded-lg bg-emerald-600/20 border border-emerald-500/30 p-3 text-sm text-emerald-200">

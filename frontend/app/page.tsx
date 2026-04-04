@@ -1,6 +1,7 @@
 import React from 'react';
 import Header from '../components/Header';
 import InteractiveBackground from '../components/InteractiveBackground';
+import { BrandLogo } from '../components/BrandLogo';
 import Link from 'next/link';
 
 export default function LandingPage() {
@@ -11,6 +12,7 @@ export default function LandingPage() {
       
       <main className="pt-40 px-6 max-w-7xl mx-auto flex flex-col items-center justify-center text-center">
         <div className="max-w-3xl space-y-6 mt-16">
+          <BrandLogo size="xl" className="justify-center mb-2" />
           <h1 className="text-6xl md:text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-purple-200 tracking-tight leading-tight">
             hadir.AI<br />
             Procurement.

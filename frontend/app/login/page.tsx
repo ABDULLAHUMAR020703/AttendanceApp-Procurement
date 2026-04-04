@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../../features/auth/AuthProvider';
 import InteractiveBackground from '../../components/InteractiveBackground';
+import { BrandLogo } from '../../components/BrandLogo';
 import Link from 'next/link';
 import { User, Lock } from 'lucide-react';
 
@@ -40,14 +41,9 @@ export default function LoginPage() {
       
       {/* Header matching Landing Page but simpler */}
       <header className="absolute top-0 left-0 w-full flex items-center justify-between px-8 py-6 z-20">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-full border border-slate-700 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-            </svg>
-          </div>
+        <BrandLogo size="md">
           <span className="font-bold tracking-widest text-sm uppercase">hadir.ai</span>
-        </div>
+        </BrandLogo>
         
         <nav className="hidden md:flex items-center gap-8 text-xs font-semibold tracking-wider text-slate-400">
           <Link href="#" className="hover:text-white transition-colors">ABOUT</Link>
@@ -86,9 +82,7 @@ export default function LoginPage() {
               <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-purple-500/10 to-transparent pointer-events-none"></div>
               
               <div className="relative z-10 flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full border border-slate-600 flex items-center justify-center mb-8 bg-[#1f1b3b]">
-                  <User size={24} className="text-slate-400" />
-                </div>
+                <BrandLogo padded className="mb-8 justify-center" />
                 
                 <form onSubmit={onSubmit} className="w-full space-y-4">
                   <div className="relative">
@@ -148,6 +142,7 @@ export default function LoginPage() {
 
         {/* Right Side: Identity/Copy */}
         <div className="w-full md:w-1/2 flex flex-col justify-center pl-0 md:pl-16">
+          <BrandLogo size="lg" className="mb-6 hidden md:flex" />
           <h1 className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-purple-200 tracking-tight leading-none mb-6">
             hadir.AI<br />
             Procurement.
@@ -160,10 +155,9 @@ export default function LoginPage() {
       </main>
 
       <footer className="absolute bottom-6 left-8 right-8 flex justify-between items-center text-[10px] text-slate-500 tracking-widest">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full border border-slate-700 flex items-center justify-center">N</div>
+        <BrandLogo size="sm">
           <span>2026 hadir.AI Procurement</span>
-        </div>
+        </BrandLogo>
         <span>Powered by HADIR</span>
       </footer>
     </div>
