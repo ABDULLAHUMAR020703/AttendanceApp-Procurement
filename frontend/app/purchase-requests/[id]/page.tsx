@@ -12,7 +12,7 @@ import { useAuth } from '../../../features/auth/AuthProvider';
 import { authedFetchWithSupabase, formatPkr, NoSessionError } from '../../../lib/api';
 import { useState } from 'react';
 import { AuditHistoryModal } from '../../../components/AuditHistoryModal';
-import { LastUpdatedPanel } from '../../../components/LastUpdatedPanel';
+import { LastUpdatedMeta, LastUpdatedPanel } from '../../../components/LastUpdatedPanel';
 import { approvalStageLabel } from '../../../lib/org';
 
 type ApprovalRow = {
@@ -23,6 +23,9 @@ type ApprovalRow = {
   status: string;
   comments: string | null;
   created_at: string;
+  updated_at?: string;
+  last_updated_at?: string | null;
+  last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
   is_admin_override?: boolean | null;
   approver?: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
 };
@@ -40,6 +43,8 @@ type DetailResponse = {
     currentStage: string | null;
     createdBy: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
     updatedBy: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+    last_updated_at?: string | null;
+    last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
   };
   project: {
     id: string;
@@ -50,6 +55,8 @@ type DetailResponse = {
     updated_at?: string;
     updated_by?: string | null;
     updatedBy?: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+    last_updated_at?: string | null;
+    last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
   } | null;
   purchaseOrder: {
     id: string;
@@ -60,6 +67,8 @@ type DetailResponse = {
     updated_at?: string;
     updated_by?: string | null;
     updatedBy?: { id: string; name?: string | null; email?: string | null; role?: string | null } | null;
+    last_updated_at?: string | null;
+    last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
   } | null;
   approvals: ApprovalRow[];
   exceptions: Array<{ id: string; type: string; status: string; approved_by: string | null; created_at: string }>;
@@ -161,8 +170,12 @@ export default function PurchaseRequestDetailsPage() {
         ) : (
           <>
             <LastUpdatedPanel
-              updatedAt={data.purchaseRequest.updatedAt}
-              updatedBy={data.purchaseRequest.updatedBy ?? data.purchaseRequest.createdBy}
+              updatedAt={data.purchaseRequest.last_updated_at ?? data.purchaseRequest.updatedAt}
+              updatedBy={
+                (data.purchaseRequest.last_updated_by as typeof data.purchaseRequest.updatedBy) ??
+                data.purchaseRequest.updatedBy ??
+                data.purchaseRequest.createdBy
+              }
               onViewHistory={() => setHistoryOpen(true)}
             />
 
@@ -182,8 +195,10 @@ export default function PurchaseRequestDetailsPage() {
 
             {data.project ? (
               <LastUpdatedPanel
-                updatedAt={data.project.updated_at}
-                updatedBy={data.project.updatedBy ?? null}
+                updatedAt={data.project.last_updated_at ?? data.project.updated_at}
+                updatedBy={
+                  (data.project.last_updated_by as typeof data.project.updatedBy) ?? data.project.updatedBy ?? null
+                }
                 onViewHistory={() => setProjectHistoryOpen(true)}
               />
             ) : null}
@@ -205,8 +220,12 @@ export default function PurchaseRequestDetailsPage() {
 
             {data.purchaseOrder ? (
               <LastUpdatedPanel
-                updatedAt={data.purchaseOrder.updated_at}
-                updatedBy={data.purchaseOrder.updatedBy ?? null}
+                updatedAt={data.purchaseOrder.last_updated_at ?? data.purchaseOrder.updated_at}
+                updatedBy={
+                  (data.purchaseOrder.last_updated_by as typeof data.purchaseOrder.updatedBy) ??
+                  data.purchaseOrder.updatedBy ??
+                  null
+                }
                 onViewHistory={() => setPoHistoryOpen(true)}
               />
             ) : null}
@@ -228,8 +247,8 @@ export default function PurchaseRequestDetailsPage() {
                       <div className="text-muted-foreground">
                         By: {a.approver?.name ?? a.approver?.email ?? a.approver_id}
                       </div>
-                      <div className="text-muted-foreground">
-                        Updated: {new Date((a as { updated_at?: string }).updated_at ?? a.created_at).toLocaleString()}
+                      <div className="mt-2">
+                        <LastUpdatedMeta at={a.last_updated_at ?? a.updated_at ?? a.created_at} user={a.last_updated_by} />
                       </div>
                       {a.comments ? <div className="text-muted-foreground">Comment: {a.comments}</div> : null}
                     </div>

@@ -5,7 +5,7 @@ import { supabaseAdmin } from '../../config/supabase';
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
 import type { Department } from '../auth/types';
-import { DEPARTMENTS } from '../auth/types';
+import { bypassesDepartmentScope, DEPARTMENTS } from '../auth/types';
 
 export const usersRouter = Router();
 
@@ -25,9 +25,9 @@ const DepartmentSchema = z.enum([
   'fixed_network',
   'warehouse',
 ]);
-const RoleSchema = z.enum(['admin', 'pm', 'employee']);
+const RoleSchema = z.enum(['admin', 'pm', 'dept_head', 'employee']);
 
-usersRouter.get('/', requireRole('admin', 'pm'), async (req, res, next) => {
+usersRouter.get('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const role = req.auth!.role;
     const deptFilter =
@@ -49,11 +49,11 @@ usersRouter.get('/', requireRole('admin', 'pm'), async (req, res, next) => {
       q = q.eq('role', parsedRole.data);
     }
 
-    if (role === 'pm') {
+    if (role === 'pm' || role === 'dept_head') {
       const d = req.auth!.department;
-      if (!d) throw new AppError('PM profile must have a department', 400);
+      if (!d) throw new AppError('Profile must have a department', 400);
       q = q.eq('department', d);
-    } else if (role === 'admin' && deptFilter) {
+    } else if (bypassesDepartmentScope(role) && deptFilter) {
       if (!DEPARTMENTS.includes(deptFilter as Department)) {
         throw new AppError('Invalid department filter', 400);
       }

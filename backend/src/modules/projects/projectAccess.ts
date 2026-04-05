@@ -1,10 +1,10 @@
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
-import type { UserRole } from '../auth/types';
+import { bypassesDepartmentScope, isDeptManagerRole, type UserRole } from '../auth/types';
 
 export type ProjectAccessRow = {
   id: string;
-  department: string;
+  department_id: string;
   team_lead_id: string | null;
   pm_id: string;
   created_by: string;
@@ -14,7 +14,7 @@ export type ProjectAccessRow = {
 export async function fetchProjectForAccess(projectId: string): Promise<ProjectAccessRow> {
   const { data: project, error } = await supabaseAdmin
     .from('projects')
-    .select('id, department, team_lead_id, pm_id, created_by, status')
+    .select('id, department_id, team_lead_id, pm_id, created_by, status')
     .eq('id', projectId)
     .single();
   if (error || !project) throw error ?? new AppError('Project not found', 404);
@@ -52,7 +52,7 @@ export async function loadEmployeeVisibleProjectIds(params: { userId: string; de
   const { data: deptProjects, error: dErr } = await supabaseAdmin
     .from('projects')
     .select('id')
-    .eq('department', department)
+    .eq('department_id', department)
     .neq('status', 'archived');
   if (dErr) throw dErr;
   const deptIds = (deptProjects ?? []).map((p) => p.id as string);
@@ -78,15 +78,15 @@ export async function assertActorMayViewProject(params: {
   actorDepartment: string | null;
 }) {
   const { project, actorUserId, actorRole, actorDepartment } = params;
-  if (actorRole === 'admin') return;
-  if (actorRole === 'pm') {
-    if (!actorDepartment || actorDepartment !== project.department) {
+  if (bypassesDepartmentScope(actorRole)) return;
+  if (isDeptManagerRole(actorRole)) {
+    if (!actorDepartment || actorDepartment !== project.department_id) {
       throw new AppError('Forbidden', 403);
     }
     return;
   }
   if (actorRole === 'employee') {
-    if (!actorDepartment || actorDepartment !== project.department) {
+    if (!actorDepartment || actorDepartment !== project.department_id) {
       throw new AppError('Forbidden', 403);
     }
     if (project.team_lead_id === actorUserId || project.pm_id === actorUserId) return;
@@ -119,15 +119,15 @@ export async function assertActorMaySubmitPurchaseRequestForProject(params: {
   actorDepartment: string | null;
 }) {
   const { project, actorUserId, actorRole, actorDepartment } = params;
-  if (actorRole === 'admin') return;
-  if (actorRole === 'pm') {
-    if (!actorDepartment || actorDepartment !== project.department) {
+  if (bypassesDepartmentScope(actorRole)) return;
+  if (isDeptManagerRole(actorRole)) {
+    if (!actorDepartment || actorDepartment !== project.department_id) {
       throw new AppError('Purchase requests can only be submitted for projects in your department', 403);
     }
     return;
   }
   if (actorRole === 'employee') {
-    if (!actorDepartment || actorDepartment !== project.department) {
+    if (!actorDepartment || actorDepartment !== project.department_id) {
       throw new AppError('Purchase requests can only be submitted for projects in your department', 403);
     }
     if (project.team_lead_id === actorUserId || project.pm_id === actorUserId) return;

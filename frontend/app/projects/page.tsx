@@ -13,6 +13,7 @@ import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
 import { ApiError, authedFetchWithSupabase, NoSessionError } from '../../lib/api';
+import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
 
 type PurchaseOrderGroup = {
   po: string;
@@ -49,12 +50,15 @@ type Project = {
   is_exception: boolean;
   created_at: string;
   created_by: string;
-  department: string;
+  department_id: string;
+  department_label?: string;
   team_lead_id: string | null;
   pm_id?: string | null;
   pm?: UserSummary | null;
   team_lead?: UserSummary | null;
   purchase_order?: ProjectPurchaseOrderSnapshot | ProjectPurchaseOrderSnapshot[] | null;
+  last_updated_at?: string | null;
+  last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
 };
 
 function formatPkr(amount: number) {
@@ -79,13 +83,17 @@ function linkedPurchaseOrder(p: Project): ProjectPurchaseOrderSnapshot | null {
   };
 }
 
+function isDeptManagerRole(role: string | undefined): boolean {
+  return role === 'pm' || role === 'dept_head';
+}
+
 function canArchiveProject(
   p: Project,
   profile: { userId: string; role: string; department?: string | null } | null,
 ): boolean {
   if (!profile) return false;
   if (profile.role === 'admin') return true;
-  if (profile.role === 'pm') return !!(profile.department && profile.department === p.department);
+  if (isDeptManagerRole(profile.role)) return !!(profile.department && profile.department === p.department_id);
   return false;
 }
 
@@ -95,7 +103,7 @@ function canAssignTeamLead(
 ): boolean {
   if (!profile) return false;
   if (profile.role === 'admin') return true;
-  if (profile.role === 'pm') return !!(profile.department && profile.department === p.department);
+  if (isDeptManagerRole(profile.role)) return !!(profile.department && profile.department === p.department_id);
   return false;
 }
 
@@ -117,7 +125,7 @@ function BudgetUsageBar({ total, remaining }: { total: number; remaining: number
   );
 }
 
-const ROLES_WITH_PO_LIST = new Set<string>(['admin', 'pm', 'employee']);
+const ROLES_WITH_PO_LIST = new Set<string>(['admin', 'pm', 'dept_head', 'employee']);
 
 type UserRow = {
   id: string;
@@ -173,7 +181,7 @@ export default function ProjectsPage() {
 
   const { data: departmentsData } = useQuery({
     queryKey: ['departments', 'list'],
-    enabled: !!token && !!supabase && profile?.role === 'admin',
+    enabled: !!token && !!supabase && (profile?.role === 'admin' || isDeptManagerRole(profile?.role)),
     queryFn: async () => {
       try {
         return await authedFetchWithSupabase<{ departments: DeptRow[] }>(supabase, '/api/departments');
@@ -190,18 +198,10 @@ export default function ProjectsPage() {
   const { data: deptUsersData } = useQuery({
     queryKey: ['users', 'by-department', effectiveDept, profile?.role],
     enabled:
-      !!token &&
-      !!supabase &&
-      (profile?.role === 'pm' || profile?.role === 'admin') &&
-      !!effectiveDept &&
-      (profile?.role === 'pm' || (profile?.role === 'admin' && !!department)),
+      !!token && !!supabase && isDeptManagerRole(profile?.role) && !!effectiveDept,
     queryFn: async () => {
       try {
-        const path =
-          profile?.role === 'admin'
-            ? `/api/users?department=${encodeURIComponent(effectiveDept)}`
-            : '/api/users';
-        return await authedFetchWithSupabase<{ users: UserRow[] }>(supabase, path);
+        return await authedFetchWithSupabase<{ users: UserRow[] }>(supabase, '/api/users');
       } catch (e) {
         if (e instanceof NoSessionError) router.replace('/login');
         throw e;
@@ -222,7 +222,7 @@ export default function ProjectsPage() {
     },
   });
 
-  const canCreate = profile?.role === 'admin' || profile?.role === 'pm';
+  const canCreate = profile?.role === 'admin' || isDeptManagerRole(profile?.role);
 
   const [name, setName] = useState('');
   const [poId, setPoId] = useState<string>('');
@@ -236,13 +236,25 @@ export default function ProjectsPage() {
   const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
 
-  const deptUsers = deptUsersData?.users ?? [];
+  const allDepartmentsForSelect = departmentsData?.departments ?? [];
+
+  const deptUsers = useMemo(() => {
+    if (profile?.role === 'admin') {
+      return (adminAllUsersData?.users ?? []).filter((u) => u.department === effectiveDept);
+    }
+    return deptUsersData?.users ?? [];
+  }, [profile?.role, adminAllUsersData?.users, deptUsersData?.users, effectiveDept]);
   const pmCandidates = useMemo(() => deptUsers.filter((u) => u.role === 'pm'), [deptUsers]);
   const teamLeadCandidates = useMemo(
     () => deptUsers.filter((u) => u.role !== 'admin'),
     [deptUsers],
   );
-  const employeePool = useMemo(() => deptUsers.filter((u) => u.role === 'employee'), [deptUsers]);
+  const employeePool = useMemo(() => {
+    if (profile?.role === 'admin') {
+      return (adminAllUsersData?.users ?? []).filter((u) => u.role === 'employee');
+    }
+    return deptUsers.filter((u) => u.role === 'employee');
+  }, [profile?.role, adminAllUsersData?.users, deptUsers]);
   const filteredEmployees = useMemo(() => {
     const q = employeeSearch.trim().toLowerCase();
     if (!q) return employeePool;
@@ -253,11 +265,6 @@ export default function ProjectsPage() {
         (u.job_title ?? '').toLowerCase().includes(q),
     );
   }, [employeePool, employeeSearch]);
-
-  const operationalDepartments = useMemo(
-    () => (departmentsData?.departments ?? []).filter((d) => d.code !== 'management'),
-    [departmentsData],
-  );
 
   const archiveMutation = useMutation({
     mutationFn: async (id: string) => {
@@ -295,9 +302,7 @@ export default function ProjectsPage() {
         team_lead_id: createTeamLeadId,
         assigned_employee_ids: [...selectedEmployeeIds],
       };
-      if (profile?.role === 'admin') {
-        payload.department = department;
-      }
+      payload.department_id = profile?.role === 'admin' ? department : (profile?.department ?? '');
       if (noPoMode) {
         payload.po_id = null;
         payload.budget = Number(budget);
@@ -361,6 +366,9 @@ export default function ProjectsPage() {
       profile?.role === 'admin' ? (adminAllUsersData?.users ?? []) : (deptUsersData?.users ?? []);
     return pool.filter((u) => u.role !== 'admin' && u.department === dept);
   };
+
+  const departmentBadgeClass =
+    'inline-flex items-center rounded-full border border-violet-500/35 bg-violet-500/15 px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-violet-100';
 
   const toggleEmployee = (id: string, checked: boolean) => {
     setSelectedEmployeeIds((prev) => {
@@ -427,13 +435,25 @@ export default function ProjectsPage() {
                       setSelectedEmployeeIds(new Set());
                     }}
                   >
-                    {operationalDepartments.map((d) => (
+                    {allDepartmentsForSelect.map((d) => (
                       <option key={d.code} value={d.code}>
                         {d.display_name}
                       </option>
                     ))}
                   </select>
                   <div className="text-xs text-muted-foreground">Pick a department first; user lists update automatically.</div>
+                </div>
+              ) : isDeptManagerRole(profile?.role) ? (
+                <div className="md:col-span-2 space-y-2">
+                  <label className="block text-sm font-medium">Department</label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={departmentBadgeClass}>
+                      {allDepartmentsForSelect.find((d) => d.code === profile?.department)?.display_name ??
+                        profile?.department ??
+                        '—'}
+                    </span>
+                    <span className="text-xs text-muted-foreground">Projects are created for this department only.</span>
+                  </div>
                 </div>
               ) : (
                 <div className="md:col-span-2 text-xs text-muted-foreground">
@@ -610,6 +630,7 @@ export default function ProjectsPage() {
                     <TH>PM</TH>
                     <TH>Team lead</TH>
                     <TH>Status</TH>
+                    <TH className="min-w-[140px]">Last updated</TH>
                     <TH>Budget & usage</TH>
                     <TH>PO</TH>
                     <TH className="w-[120px]">Actions</TH>
@@ -634,7 +655,9 @@ export default function ProjectsPage() {
                             </div>
                           ) : null}
                         </TD>
-                        <TD className="text-sm capitalize">{p.department}</TD>
+                        <TD>
+                          <span className={departmentBadgeClass}>{p.department_label ?? p.department_id}</span>
+                        </TD>
                         <TD className="text-sm max-w-[140px] truncate">
                           {p.pm?.name ?? p.pm?.email ?? '—'}
                         </TD>
@@ -650,7 +673,7 @@ export default function ProjectsPage() {
                               disabled={teamLeadMutation.isPending}
                             >
                               <option value="">None</option>
-                              {teamLeadCandidatesForDept(p.department).map((u) => (
+                              {teamLeadCandidatesForDept(p.department_id).map((u) => (
                                 <option key={u.id} value={u.id}>
                                   {u.name}
                                 </option>
@@ -663,6 +686,9 @@ export default function ProjectsPage() {
                           )}
                         </TD>
                         <TD>{p.is_exception ? `${p.status} (exception)` : p.status}</TD>
+                        <TD className="align-top">
+                          <LastUpdatedMeta at={p.last_updated_at} user={p.last_updated_by} />
+                        </TD>
                         <TD>
                           {hasPoBudget ? (
                             <div className="space-y-2 py-1">

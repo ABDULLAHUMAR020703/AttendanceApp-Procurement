@@ -31,13 +31,15 @@ type ProjectDetailResponse = {
     budget: number;
     status: string;
     is_exception: boolean;
-    department: string;
+    department_id: string;
     department_label?: string;
     team_lead_id: string | null;
     pm_id?: string | null;
     created_at: string;
     updated_at?: string;
     updatedBy: { id: string; name: string; email: string; role: string } | null;
+    last_updated_at?: string | null;
+    last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
     pm: UserLite | null;
     team_lead: UserLite | null;
     assigned_employees: UserLite[];
@@ -51,6 +53,8 @@ type ProjectDetailResponse = {
     remaining_value: number;
     updated_at?: string;
     updatedBy: { id: string; name: string; email: string; role: string } | null;
+    last_updated_at?: string | null;
+    last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
   } | null;
 };
 
@@ -74,7 +78,8 @@ export default function ProjectDetailPage() {
   const [employeeSearch, setEmployeeSearch] = useState('');
   const [editMembers, setEditMembers] = useState(false);
 
-  const canManageMembers = profile?.role === 'admin' || profile?.role === 'pm';
+  const canManageMembers =
+    profile?.role === 'admin' || profile?.role === 'pm' || profile?.role === 'dept_head';
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['project-detail', projectId],
@@ -92,14 +97,12 @@ export default function ProjectDetailPage() {
   const p = data?.project;
 
   const usersPath = useMemo(() => {
-    if (profile?.role === 'admin' && p?.department) {
-      return `/api/users?department=${encodeURIComponent(p.department)}&role=employee`;
-    }
-    if (profile?.role === 'pm') {
+    const r = profile?.role;
+    if (r === 'admin' || r === 'pm' || r === 'dept_head') {
       return '/api/users?role=employee';
     }
     return null;
-  }, [profile?.role, p?.department]);
+  }, [profile?.role]);
 
   const { data: deptEmployees } = useQuery({
     queryKey: ['users', 'project-members-pool', usersPath],
@@ -147,6 +150,7 @@ export default function ProjectDetailPage() {
   };
 
   const employeePool = deptEmployees?.users ?? [];
+
   const filteredPool = useMemo(() => {
     const q = employeeSearch.trim().toLowerCase();
     if (!q) return employeePool;
@@ -189,15 +193,15 @@ export default function ProjectDetailPage() {
         {p ? (
           <>
             <LastUpdatedPanel
-              updatedAt={p.updated_at}
-              updatedBy={p.updatedBy}
+              updatedAt={p.last_updated_at ?? p.updated_at}
+              updatedBy={(p.last_updated_by as typeof p.updatedBy) ?? p.updatedBy}
               onViewHistory={() => setProjectHistoryOpen(true)}
             />
 
             <Card className="p-6 space-y-3 text-sm">
               <h2 className="text-lg font-medium text-foreground">{p.name}</h2>
               <div className="text-muted-foreground">
-                Department: <span className="text-foreground capitalize">{p.department_label ?? p.department}</span>
+                Department: <span className="text-foreground capitalize">{p.department_label ?? p.department_id}</span>
               </div>
               <div className="text-muted-foreground">
                 Project Manager:{' '}
@@ -294,8 +298,11 @@ export default function ProjectDetailPage() {
                   </div>
                 </Card>
                 <LastUpdatedPanel
-                  updatedAt={pData.purchaseOrder.updated_at}
-                  updatedBy={pData.purchaseOrder.updatedBy}
+                  updatedAt={pData.purchaseOrder.last_updated_at ?? pData.purchaseOrder.updated_at}
+                  updatedBy={
+                    (pData.purchaseOrder.last_updated_by as typeof pData.purchaseOrder.updatedBy) ??
+                    pData.purchaseOrder.updatedBy
+                  }
                   onViewHistory={() => setPoHistoryOpen(true)}
                 />
               </>

@@ -12,6 +12,7 @@ import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/
 import { useAuth } from '../../features/auth/AuthProvider';
 import { PrPoLineMetricsCells, type PoLineSummary } from '../../components/PrPoLineMetricsCells';
 import { authedFetchWithSupabase, NoSessionError } from '../../lib/api';
+import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
 import { useState } from 'react';
 import {
   approvalPipelineStatus,
@@ -35,6 +36,10 @@ type Approval = {
   status: string;
   comments: string | null;
   created_at: string;
+  updated_at?: string | null;
+  updated_by?: string | null;
+  last_updated_at?: string | null;
+  last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
   is_admin_override?: boolean | null;
   purchase_request?: PurchaseRequestMeta | null;
 };
@@ -293,6 +298,9 @@ export default function ApprovalsPage() {
                           {a.is_admin_override ? (
                             <div className="text-xs text-amber-200/90">This row was decided via an administrator action.</div>
                           ) : null}
+                          <div className="pt-2 border-t border-white/5 mt-2">
+                            <LastUpdatedMeta at={a.last_updated_at ?? a.updated_at} user={a.last_updated_by} />
+                          </div>
                         </div>
                         {isAdmin ? (
                           <div className="flex flex-wrap gap-2 justify-end">

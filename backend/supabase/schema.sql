@@ -2,16 +2,21 @@
 -- Notes:
 -- - Uses UUID primary keys and timestamptz timestamps.
 -- - "reference_id" in exceptions is intentionally polymorphic (can point to projects or purchase_requests).
--- - User-facing roles: admin | pm | employee (team_lead is project-scoped via projects.team_lead_id).
+-- - User-facing roles: admin | pm | dept_head | employee (team_lead is project-scoped via projects.team_lead_id).
 
 create extension if not exists pgcrypto;
+
+create table if not exists public.departments (
+  code text primary key,
+  display_name text not null
+);
 
 -- USERS (application profile for RBAC)
 create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   email text not null unique,
-  role text not null check (role in ('admin', 'pm', 'employee')),
+  role text not null check (role in ('admin', 'pm', 'dept_head', 'employee')),
   department text not null check (
     department in (
       'sales', 'hr', 'technical', 'finance', 'engineering', 'management',
@@ -46,12 +51,7 @@ create table if not exists public.projects (
   name text not null,
   po_id uuid references public.purchase_orders (id) on delete set null,
   budget numeric(20, 2) not null check (budget >= 0),
-  department text not null check (
-    department in (
-      'sales', 'hr', 'technical', 'finance', 'engineering', 'management',
-      'ibs', 'power', 'civil_works', 'bss_wireless', 'fixed_network', 'warehouse'
-    )
-  ),
+  department_id text not null references public.departments (code),
   team_lead_id uuid references public.users (id) on delete set null,
   created_by uuid not null references public.users (id),
   status text not null default 'active',
@@ -64,7 +64,7 @@ create table if not exists public.projects (
 create index if not exists projects_po_idx on public.projects (po_id);
 create index if not exists projects_created_by_idx on public.projects (created_by);
 create index if not exists projects_status_idx on public.projects (status);
-create index if not exists projects_department_idx on public.projects (department);
+create index if not exists projects_department_id_idx on public.projects (department_id);
 create index if not exists projects_team_lead_idx on public.projects (team_lead_id);
 
 -- PURCHASE REQUESTS (PR)
@@ -134,10 +134,13 @@ create table if not exists public.audit_logs (
   entity_id uuid not null,
   reason text,
   changes jsonb,
+  department_scope text,
   timestamp timestamptz not null default now()
 );
 
 create index if not exists audit_logs_entity_idx on public.audit_logs (entity, entity_id);
+create index if not exists audit_logs_department_scope_timestamp_idx
+  on public.audit_logs (department_scope, timestamp desc);
 
 -- IN-APP NOTIFICATIONS
 create table if not exists public.notifications (

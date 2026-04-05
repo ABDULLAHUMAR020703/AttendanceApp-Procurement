@@ -16,6 +16,7 @@ import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/
 import { useAuth } from '../../features/auth/AuthProvider';
 import { ApiError, authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../lib/api';
 import { sortApprovalStageIndex } from '../../lib/org';
+import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
 
 type ProjectPurchaseOrderSnapshot = { total_value: number; remaining_value: number };
 type Project = {
@@ -41,6 +42,8 @@ type PurchaseRequest = {
   status: string;
   created_at: string;
   created_by: string;
+  last_updated_at?: string | null;
+  last_updated_by?: { id: string; name: string | null; email: string | null; role: string | null } | null;
 };
 
 function ordinalTimeWord(occurrence: number): string {
@@ -645,6 +648,7 @@ export default function PurchaseRequestsPage() {
                     </TH>
                     <TH>After approval</TH>
                     <TH>Status</TH>
+                    <TH className="min-w-[140px]">Last updated</TH>
                     <TH>Request</TH>
                     {isAdmin ? <TH>Actions</TH> : null}
                   </TR>
@@ -654,6 +658,9 @@ export default function PurchaseRequestsPage() {
                     <TR key={pr.id}>
                       <PrPoLineMetricsCells summary={pr.po_line_summary} />
                       <TD className="text-xs">{pr.status}</TD>
+                      <TD className="text-xs align-top">
+                        <LastUpdatedMeta at={pr.last_updated_at} user={pr.last_updated_by} />
+                      </TD>
                       <TD className="text-xs">
                         {isAdmin ? (
                           <Link className="text-purple-300 underline" href={`/purchase-requests/${pr.id}`}>

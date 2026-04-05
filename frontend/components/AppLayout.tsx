@@ -13,23 +13,23 @@ const navItems = [
   {
     href: '/dashboard',
     label: 'Dashboard',
-    roles: ['employee', 'admin', 'pm'],
+    roles: ['employee', 'admin', 'pm', 'dept_head'],
   },
-  { href: '/po/upload', label: 'PO Upload', roles: ['admin', 'pm'] },
+  { href: '/po/upload', label: 'PO Upload', roles: ['admin', 'pm', 'dept_head'] },
   {
     href: '/projects',
     label: 'Projects',
-    roles: ['employee', 'admin', 'pm'],
+    roles: ['employee', 'admin', 'pm', 'dept_head'],
   },
   {
     href: '/purchase-requests',
     label: 'Purchase Requests',
-    roles: ['employee', 'admin', 'pm'],
+    roles: ['employee', 'admin', 'pm', 'dept_head'],
   },
   {
     href: '/approvals',
     label: 'Approvals',
-    roles: ['employee', 'admin', 'pm'],
+    roles: ['employee', 'admin', 'pm', 'dept_head'],
   },
   { href: '/admin/users', label: 'Admin: Users', roles: ['admin'] },
 ];

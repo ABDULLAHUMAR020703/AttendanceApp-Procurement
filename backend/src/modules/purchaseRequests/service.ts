@@ -2,8 +2,7 @@ import { env } from '../../config/env';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { startApprovalsForPurchaseRequest } from '../approvals/engine';
-import { writeAuditLog } from '../auditLogs/service';
-import { createInAppNotification, enqueueEmailPlaceholder, getUserEmail } from '../notifications/service';
+import { recordTrackedAction } from '../auditLogs/trackedAction';
 import type { UserRole } from '../auth/types';
 import { normalizeItemCode } from '../../utils/itemCode';
 import {
@@ -24,14 +23,6 @@ export async function countPreviousPrsForSameItem(userId: string, itemCodeNorm: 
     .eq('item_code', itemCodeNorm);
   if (error) throw error;
   return count ?? 0;
-}
-
-async function notifyUser(params: { userId: string; type: string; message: string; emailSubject: string }) {
-  await createInAppNotification({ userId: params.userId, type: params.type, message: params.message });
-  const email = await getUserEmail(params.userId);
-  if (email) {
-    await enqueueEmailPlaceholder({ toEmail: email, subject: params.emailSubject, body: params.message });
-  }
 }
 
 export async function createPurchaseRequest(params: {
@@ -64,7 +55,7 @@ export async function createPurchaseRequest(params: {
 
   const { data: project, error: prjErr } = await supabaseAdmin
     .from('projects')
-    .select('id, po_id, budget, status, created_by, department, team_lead_id, pm_id')
+    .select('id, po_id, budget, status, created_by, department_id, team_lead_id, pm_id')
     .eq('id', projectId)
     .single();
   if (prjErr || !project) throw prjErr ?? new AppError('Project not found', 404);
@@ -95,7 +86,7 @@ export async function createPurchaseRequest(params: {
   await assertActorMaySubmitPurchaseRequestForProject({
     project: {
       id: project.id as string,
-      department: project.department as string,
+      department_id: project.department_id as string,
       team_lead_id: (project.team_lead_id as string | null) ?? null,
       pm_id: pmRowId,
       created_by: project.created_by as string,
@@ -273,20 +264,31 @@ export async function createPurchaseRequest(params: {
     .single();
   if (prInsErr || !pr) throw prInsErr ?? new AppError('Failed to create purchase request', 500);
 
-  await writeAuditLog({
-    action: 'purchase_request_created',
-    userId: createdBy,
-    entity: 'purchase_request',
-    entityType: 'purchase_request',
-    entityId: pr.id,
-    changes: { amount: reqAmount, project_id: project.id, po_line_id: matchedPoLineId },
-  });
-
-  await notifyUser({
-    userId: createdBy,
-    type: 'pr_created',
-    message: `Your Purchase Request ${pr.id} was submitted and is now pending approvals.`,
-    emailSubject: 'PR Created',
+  await recordTrackedAction({
+    audit: {
+      action: 'purchase_request_created',
+      userId: createdBy,
+      entity: 'purchase_request',
+      entityType: 'purchase_request',
+      entityId: pr.id as string,
+      changes: { amount: reqAmount, project_id: project.id, po_line_id: matchedPoLineId },
+      departmentScope: project.department_id as string,
+    },
+    touch: { table: 'purchase_requests', id: pr.id as string },
+    notify: [
+      {
+        userId: createdBy,
+        type: 'pr_created',
+        message: `Your Purchase Request ${pr.id} was submitted and is now pending approvals.`,
+        emailSubject: 'PR Created',
+      },
+      {
+        userId: pmRowId,
+        type: 'pr_submitted_for_project',
+        message: `A new purchase request (${String(pr.id).slice(0, 8)}…) was submitted on your project.`,
+        emailSubject: 'New purchase request',
+      },
+    ],
   });
 
   await startApprovalsForPurchaseRequest(pr.id, createdBy);

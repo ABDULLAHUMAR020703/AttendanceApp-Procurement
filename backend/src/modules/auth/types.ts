@@ -1,4 +1,14 @@
-export type UserRole = 'admin' | 'pm' | 'employee';
+export type UserRole = 'admin' | 'pm' | 'dept_head' | 'employee';
+
+/** PM or department head — same department-scoped project and PO privileges. */
+export function isDeptManagerRole(role: UserRole): boolean {
+  return role === 'pm' || role === 'dept_head';
+}
+
+/** Admins are not limited to one department for reads, list filters, or scope checks. */
+export function bypassesDepartmentScope(role: UserRole): boolean {
+  return role === 'admin';
+}
 
 /** Departments; admin users use `management` only. */
 export type Department =

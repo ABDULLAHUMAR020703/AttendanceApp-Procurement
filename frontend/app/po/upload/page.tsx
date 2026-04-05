@@ -70,7 +70,7 @@ export default function PoUploadPage() {
   };
 
   const role = profile?.role;
-  const canUpload = role === 'admin' || role === 'pm';
+  const canUpload = role === 'admin' || role === 'pm' || role === 'dept_head';
 
   return (
     <AppLayout>

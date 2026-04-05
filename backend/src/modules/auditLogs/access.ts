@@ -1,6 +1,6 @@
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
-import type { UserRole } from '../auth/types';
+import { bypassesDepartmentScope, type UserRole } from '../auth/types';
 import { assertActorMayViewProject, fetchProjectForAccess } from '../projects/projectAccess';
 
 /** Normalize URL segment to stored audit / entity_type values. */
@@ -19,7 +19,7 @@ export async function assertActorCanViewEntityAudit(params: {
   entityId: string;
 }): Promise<void> {
   const { actorUserId, actorRole, actorDepartment, entityType, entityId } = params;
-  if (actorRole === 'admin') return;
+  if (bypassesDepartmentScope(actorRole as UserRole)) return;
 
   if (entityType === 'purchase_request') {
     const { data: pr, error: prErr } = await supabaseAdmin
@@ -74,11 +74,11 @@ export async function assertActorCanViewEntityAudit(params: {
 
     const { data: byPoId, error: pErr } = await supabaseAdmin
       .from('projects')
-      .select('id, department')
+      .select('id, department_id')
       .eq('po_id', entityId)
       .limit(25);
     if (pErr) throw pErr;
-    if (byPoId?.some((p) => actorDepartment && p.department === actorDepartment)) return;
+    if (byPoId?.some((p) => actorDepartment && p.department_id === actorDepartment)) return;
 
     const poText = String((po as { po?: string | null }).po ?? '').trim();
     if (poText && actorDepartment) {

@@ -1,10 +1,9 @@
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
-import { writeAuditLog } from '../auditLogs/service';
-import { createInAppNotification, enqueueEmailPlaceholder, getUserEmail } from '../notifications/service';
+import { recordTrackedAction } from '../auditLogs/trackedAction';
 import type { UserRole } from '../auth/types';
 import type { Department } from '../auth/types';
-import { DEPARTMENTS } from '../auth/types';
+import { bypassesDepartmentScope, DEPARTMENTS, isDeptManagerRole } from '../auth/types';
 import {
   assertActorMayManageProject,
   assertUserEligibleTeamLead,
@@ -18,8 +17,8 @@ type CreateProjectInput = {
   createdBy: string;
   actorRole: UserRole;
   actorDepartment: string | null;
-  /** Required when actor is admin; ignored for PM (derived from actor department). */
-  department?: Department | null;
+  /** FK to departments.code; admin picks freely; PM/dept_head must match profile. */
+  departmentId: Department;
   /** Department PM responsible for this project (approval workflow). */
   pmId: string;
   teamLeadId: string;
@@ -33,35 +32,29 @@ function normalizeDepartment(value: string | null | undefined): Department | nul
 }
 
 function resolveProjectDepartmentForCreate(input: CreateProjectInput): Department {
-  if (input.actorRole === 'admin') {
-    const d = normalizeDepartment(input.department ?? undefined);
-    if (!d) throw new AppError('department is required when creating a project as admin', 400);
-    if (d === 'management') {
-      throw new AppError('Projects cannot be assigned to the management department', 400);
-    }
-    return d;
+  const fromBody = normalizeDepartment(input.departmentId);
+  if (!fromBody) throw new AppError('department_id is required', 400);
+  if (fromBody === 'management') {
+    throw new AppError('Projects cannot be assigned to the management department', 400);
   }
-  if (input.actorRole === 'pm') {
-    const d = normalizeDepartment(input.actorDepartment ?? undefined);
-    if (!d) throw new AppError('PM profile must have a department to create projects', 400);
-    if (d === 'management') {
-      throw new AppError('Admin users manage org-wide configuration; use an operational department PM account', 403);
-    }
-    return d;
-  }
-  throw new AppError('Forbidden', 403);
-}
 
-async function notifyAssignedPm(pmUserId: string, params: { type: string; message: string; emailSubject: string }) {
-  await createInAppNotification({ userId: pmUserId, type: params.type, message: params.message });
-  const email = await getUserEmail(pmUserId);
-  if (email) {
-    await enqueueEmailPlaceholder({
-      toEmail: email,
-      subject: params.emailSubject,
-      body: params.message,
-    });
+  if (bypassesDepartmentScope(input.actorRole)) {
+    return fromBody;
   }
+
+  if (isDeptManagerRole(input.actorRole)) {
+    const actorDept = normalizeDepartment(input.actorDepartment ?? undefined);
+    if (!actorDept) throw new AppError('Your profile must have a department to create projects', 400);
+    if (actorDept === 'management') {
+      throw new AppError('Use an operational department account to create projects', 403);
+    }
+    if (actorDept !== fromBody) {
+      throw new AppError('department_id must match your profile department', 403);
+    }
+    return fromBody;
+  }
+
+  throw new AppError('Forbidden', 403);
 }
 
 async function validatePmForDepartment(pmId: string, department: string) {
@@ -120,16 +113,39 @@ export async function updateProjectMemberAssignments(params: {
     throw new AppError('Cannot assign the project PM as a member row; PM is already on the project', 400);
   }
 
-  await validateAssignedEmployees(unique, project.department);
+  await validateAssignedEmployees(unique, project.department_id);
   await replaceProjectAssignments(projectId, unique, project.team_lead_id);
 
-  await writeAuditLog({
-    action: 'project_members_updated',
-    userId: actorUserId,
-    entity: 'project',
-    entityType: 'project',
-    entityId: projectId,
-    changes: { assigned_employee_ids: unique },
+  const notify: import('../auditLogs/trackedAction').TrackedNotifyEntry[] = [];
+  if (project.pm_id) {
+    notify.push({
+      userId: project.pm_id as string,
+      type: 'project_members_updated',
+      message: 'Project member assignments were updated.',
+      emailSubject: 'Project members updated',
+    });
+  }
+  if (project.team_lead_id && project.team_lead_id !== project.pm_id) {
+    notify.push({
+      userId: project.team_lead_id as string,
+      type: 'project_members_updated',
+      message: 'Project member assignments were updated.',
+      emailSubject: 'Project members updated',
+    });
+  }
+
+  await recordTrackedAction({
+    audit: {
+      action: 'project_members_updated',
+      userId: actorUserId,
+      entity: 'project',
+      entityType: 'project',
+      entityId: projectId,
+      changes: { assigned_employee_ids: unique },
+      departmentScope: project.department_id,
+    },
+    touch: { table: 'projects', id: projectId },
+    notify,
   });
 
   return { ok: true as const };
@@ -137,7 +153,7 @@ export async function updateProjectMemberAssignments(params: {
 
 export async function createProjectWithExceptionFlow(input: CreateProjectInput) {
   const { name, poId, budget, createdBy, actorRole, pmId, teamLeadId, assignedEmployeeIds } = input;
-  const department = resolveProjectDepartmentForCreate(input);
+  const departmentId = resolveProjectDepartmentForCreate(input);
 
   if (!name.trim()) throw new AppError('Project name is required', 400);
 
@@ -146,9 +162,9 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
     throw new AppError('Project manager cannot be listed as an assigned employee', 400);
   }
 
-  await validatePmForDepartment(pmId, department);
-  await assertUserEligibleTeamLead({ teamLeadUserId: teamLeadId, projectDepartment: department });
-  await validateAssignedEmployees(memberIds, department);
+  await validatePmForDepartment(pmId, departmentId);
+  await assertUserEligibleTeamLead({ teamLeadUserId: teamLeadId, projectDepartment: departmentId });
+  await validateAssignedEmployees(memberIds, departmentId);
 
   if (poId) {
     const { data: po, error: poErr } = await supabaseAdmin
@@ -169,7 +185,7 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
         name,
         po_id: poId,
         budget: derivedBudget,
-        department,
+        department_id: departmentId,
         pm_id: pmId,
         team_lead_id: teamLeadId,
         created_by: createdBy,
@@ -177,18 +193,30 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
         status: 'active',
         is_exception: false,
       })
-      .select('id, name, po_id, budget, status, is_exception, department, team_lead_id, pm_id')
+      .select('id, name, po_id, budget, status, is_exception, department_id, team_lead_id, pm_id')
       .single();
     if (prErr) throw prErr;
 
     await replaceProjectAssignments(project.id as string, memberIds, teamLeadId);
 
-    await writeAuditLog({
-      action: 'project_created',
-      userId: createdBy,
-      entity: 'project',
-      entityType: 'project',
-      entityId: project.id,
+    await recordTrackedAction({
+      audit: {
+        action: 'project_created',
+        userId: createdBy,
+        entity: 'project',
+        entityType: 'project',
+        entityId: project.id as string,
+        departmentScope: departmentId,
+      },
+      touch: { table: 'projects', id: project.id as string },
+      notify: [
+        {
+          userId: pmId,
+          type: 'project_created',
+          message: `New project "${name}" was created; you are assigned as PM.`,
+          emailSubject: 'New project created',
+        },
+      ],
     });
 
     return { project };
@@ -201,7 +229,7 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
       name,
       po_id: null,
       budget: Number(budget),
-      department,
+      department_id: departmentId,
       pm_id: pmId,
       team_lead_id: teamLeadId,
       created_by: createdBy,
@@ -209,7 +237,7 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
       status: 'exception_pending',
       is_exception: true,
     })
-    .select('id, name, po_id, budget, status, is_exception, department, team_lead_id, pm_id')
+    .select('id, name, po_id, budget, status, is_exception, department_id, team_lead_id, pm_id')
     .single();
   if (prjErr || !project) throw prjErr ?? new AppError('Failed to create project', 500);
 
@@ -228,32 +256,33 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
   if (exErr || !exception) throw exErr ?? new AppError('Failed to create no_po exception', 500);
 
   const message = `No-PO exception requested for project "${project.name}". Approval required to proceed with purchase requests.`;
-  await notifyAssignedPm(pmId, {
-    type: 'exception_no_po_pending',
-    message,
-    emailSubject: 'No-PO Exception Approval Required',
-  });
-
   const creatorMessage = `Project "${project.name}" was created without a PO. It is pending PM approval in your department before you can submit purchase requests.`;
-  await createInAppNotification({
-    userId: createdBy,
-    type: 'no_po_exception_pending',
-    message: creatorMessage,
-  });
-  const creatorEmail = await getUserEmail(createdBy);
-  if (creatorEmail) {
-    await enqueueEmailPlaceholder({
-      toEmail: creatorEmail,
-      subject: 'No-PO Exception Pending Approval',
-      body: creatorMessage,
-    });
-  }
 
-  await writeAuditLog({
-    action: 'no_po_exception_created',
-    userId: createdBy,
-    entity: 'exception',
-    entityId: exception.id,
+  await recordTrackedAction({
+    audit: {
+      action: 'no_po_exception_created',
+      userId: createdBy,
+      entity: 'exception',
+      entityType: 'exception',
+      entityId: exception.id as string,
+      departmentScope: departmentId,
+      changes: { project_id: project.id, exception_id: exception.id },
+    },
+    touch: { table: 'projects', id: project.id as string },
+    notify: [
+      {
+        userId: pmId,
+        type: 'exception_no_po_pending',
+        message,
+        emailSubject: 'No-PO Exception Approval Required',
+      },
+      {
+        userId: createdBy,
+        type: 'no_po_exception_pending',
+        message: creatorMessage,
+        emailSubject: 'No-PO Exception Pending Approval',
+      },
+    ],
   });
 
   return { project, exception };
@@ -290,7 +319,7 @@ async function hasCommittedFinancialActivity(projectId: string): Promise<boolean
 export async function archiveProject(params: { projectId: string; actorUserId: string; actorRole: UserRole; actorDepartment?: string | null }) {
   const { projectId, actorUserId, actorRole, actorDepartment } = params;
 
-  if (actorRole !== 'admin' && actorRole !== 'pm') {
+  if (!bypassesDepartmentScope(actorRole) && !isDeptManagerRole(actorRole)) {
     throw new AppError('Forbidden', 403);
   }
 
@@ -300,9 +329,9 @@ export async function archiveProject(params: { projectId: string; actorUserId: s
     throw new AppError('Project is already archived', 409);
   }
 
-  if (actorRole === 'pm') {
-    if (!actorDepartment || actorDepartment !== project.department) {
-      throw new AppError('PM can only archive projects in their department', 403);
+  if (isDeptManagerRole(actorRole)) {
+    if (!actorDepartment || actorDepartment !== project.department_id) {
+      throw new AppError('You can only archive projects in your department', 403);
     }
   }
 
@@ -316,13 +345,27 @@ export async function archiveProject(params: { projectId: string; actorUserId: s
     .eq('id', projectId);
   if (upErr) throw upErr;
 
-  await writeAuditLog({
-    action: 'project_archived',
-    userId: actorUserId,
-    entity: 'project',
-    entityType: 'project',
-    entityId: projectId,
-    changes: { status: { after: 'archived' } },
+  const notify: import('../auditLogs/trackedAction').TrackedNotifyEntry[] = [];
+  if (project.pm_id) {
+    notify.push({
+      userId: project.pm_id as string,
+      type: 'project_archived',
+      message: `Project "${projectId.slice(0, 8)}…" was archived.`,
+      emailSubject: 'Project archived',
+    });
+  }
+
+  await recordTrackedAction({
+    audit: {
+      action: 'project_archived',
+      userId: actorUserId,
+      entity: 'project',
+      entityType: 'project',
+      entityId: projectId,
+      changes: { status: { after: 'archived' } },
+      departmentScope: project.department_id,
+    },
+    notify,
   });
 
   return { ok: true as const, status: 'archived' as const };
@@ -346,7 +389,7 @@ export async function updateProjectTeamLead(params: {
   });
 
   if (teamLeadId) {
-    await assertUserEligibleTeamLead({ teamLeadUserId: teamLeadId, projectDepartment: project.department });
+    await assertUserEligibleTeamLead({ teamLeadUserId: teamLeadId, projectDepartment: project.department_id });
   }
 
   const { error } = await supabaseAdmin
@@ -367,18 +410,40 @@ export async function updateProjectTeamLead(params: {
     }
   }
 
-  await writeAuditLog({
-    action: 'project_team_lead_updated',
-    userId: actorUserId,
-    entity: 'project',
-    entityType: 'project',
-    entityId: projectId,
-    changes: { team_lead_id: { after: teamLeadId } },
+  const notify: import('../auditLogs/trackedAction').TrackedNotifyEntry[] = [];
+  if (project.pm_id) {
+    notify.push({
+      userId: project.pm_id as string,
+      type: 'project_team_lead_updated',
+      message: 'Team lead was updated on a project you manage.',
+      emailSubject: 'Team lead updated',
+    });
+  }
+  if (teamLeadId && teamLeadId !== project.pm_id) {
+    notify.push({
+      userId: teamLeadId,
+      type: 'project_team_lead_assigned',
+      message: 'You were set as team lead on a project.',
+      emailSubject: 'Team lead assignment',
+    });
+  }
+
+  await recordTrackedAction({
+    audit: {
+      action: 'project_team_lead_updated',
+      userId: actorUserId,
+      entity: 'project',
+      entityType: 'project',
+      entityId: projectId,
+      changes: { team_lead_id: { after: teamLeadId } },
+      departmentScope: project.department_id,
+    },
+    notify,
   });
 
   const { data: updated, error: selErr } = await supabaseAdmin
     .from('projects')
-    .select('id, name, department, team_lead_id, pm_id, status, po_id, budget, is_exception')
+    .select('id, name, department_id, team_lead_id, pm_id, status, po_id, budget, is_exception')
     .eq('id', projectId)
     .single();
   if (selErr) throw selErr;
