@@ -1,9 +1,9 @@
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
-import { writeAuditLog } from '../auditLogs/service';
-import { createInAppNotification, enqueueEmailPlaceholder, getUserEmail } from '../notifications/service';
+import { writeApprovalAuditLogs, writeAuditLog } from '../auditLogs/service';
+import { deliverTrackedNotifications, recordTrackedAction, touchEntityRow } from '../auditLogs/trackedAction';
 import type { ApprovalStageRole, RequiredApprovalStageRole, UserRole } from '../auth/types';
-import { REQUIRED_APPROVAL_STAGE_ORDER } from '../auth/types';
+import { bypassesDepartmentScope, REQUIRED_APPROVAL_STAGE_ORDER } from '../auth/types';
 import { buildApprovalStagesForProject } from '../org/approvers';
 import { fetchProjectOrThrow } from '../org/projectGuards';
 
@@ -13,21 +13,9 @@ export function getApprovalStageOrder(): readonly RequiredApprovalStageRole[] {
   return REQUIRED_APPROVAL_STAGE_ORDER;
 }
 
-async function notifyUser(params: { userId: string; type: string; message: string; emailSubject: string }) {
-  await createInAppNotification({
-    userId: params.userId,
-    type: params.type,
-    message: params.message,
-  });
-
-  const email = await getUserEmail(params.userId);
-  if (email) {
-    await enqueueEmailPlaceholder({
-      toEmail: email,
-      subject: params.emailSubject,
-      body: params.message,
-    });
-  }
+async function departmentScopeForProjectId(projectId: string): Promise<string | null> {
+  const { data } = await supabaseAdmin.from('projects').select('department_id').eq('id', projectId).maybeSingle();
+  return (data?.department_id as string | null) ?? null;
 }
 
 export async function startApprovalsForPurchaseRequest(prId: string, triggeredBy: string) {
@@ -73,19 +61,24 @@ export async function startApprovalsForPurchaseRequest(prId: string, triggeredBy
 
   const label = humanizeStageLabel(firstRole);
   const message = `Purchase Request ${pr.id} is ready for your ${label}.`;
-  await notifyUser({
-    userId: firstApproval.approver_id,
-    type: 'pr_approval_pending',
-    message,
-    emailSubject: 'PR Approval Pending',
-  });
-
-  await writeAuditLog({
-    action: 'approvals_started',
-    userId: triggeredBy,
-    entity: 'purchase_request',
-    entityType: 'purchase_request',
-    entityId: pr.id,
+  await recordTrackedAction({
+    audit: {
+      action: 'approvals_started',
+      userId: triggeredBy,
+      entity: 'purchase_request',
+      entityType: 'purchase_request',
+      entityId: pr.id as string,
+      departmentScope: project.department_id,
+    },
+    touch: { table: 'purchase_requests', id: pr.id as string },
+    notify: [
+      {
+        userId: firstApproval.approver_id as string,
+        type: 'pr_approval_pending',
+        message,
+        emailSubject: 'PR Approval Pending',
+      },
+    ],
   });
 }
 
@@ -171,8 +164,9 @@ async function performAdminForceApprove(params: {
   actorUserId: string;
   comments: string | null;
   touchedApprovalId: string;
+  departmentScope: string | null;
 }): Promise<{ prId: string; status: 'approved'; approval: Record<string, unknown> }> {
-  const { pr, actorUserId, comments, touchedApprovalId } = params;
+  const { pr, actorUserId, comments, touchedApprovalId, departmentScope } = params;
   if (pr.status !== 'pending' && pr.status !== 'pending_exception') {
     throw new AppError(`PR is not in a state that allows force approval (status=${pr.status})`, 409);
   }
@@ -203,6 +197,13 @@ async function performAdminForceApprove(params: {
       })
       .in('id', pendingIds);
     if (upErr) throw upErr;
+    await writeApprovalAuditLogs({
+      approvalIds: pendingIds,
+      action: 'approved',
+      userId: actorUserId,
+      reason: 'admin_force_approve',
+      departmentScope,
+    });
   }
 
   let rpcResult: Record<string, unknown> = {};
@@ -225,13 +226,6 @@ async function performAdminForceApprove(params: {
     .single();
   if (selErr || !updatedApproval) throw selErr ?? new AppError('Approval row not found after force approve', 500);
 
-  await notifyUser({
-    userId: pr.created_by,
-    type: 'pr_approved',
-    message: `Purchase Request ${pr.id} was fully approved (administrator force approve).`,
-    emailSubject: 'PR Approved',
-  });
-
   await writeAuditLog({
     action: 'admin_force_approve',
     userId: actorUserId,
@@ -240,6 +234,7 @@ async function performAdminForceApprove(params: {
     entityId: pr.id,
     reason: auditPayloadPreview({ finalize: rpcResult }),
     changes: { via: 'admin_force_approve', finalize: rpcResult },
+    departmentScope,
   });
 
   await writeAuditLog({
@@ -250,6 +245,7 @@ async function performAdminForceApprove(params: {
     entityId: pr.id,
     reason: auditPayloadPreview({ ...rpcResult, via: 'admin_force_approve' }),
     changes: { finalize: rpcResult },
+    departmentScope,
   });
 
   await writeAuditLog({
@@ -259,7 +255,18 @@ async function performAdminForceApprove(params: {
     entityType: 'purchase_request',
     entityId: pr.id,
     changes: { status: { after: 'approved' }, via: 'admin_force_approve' },
+    departmentScope,
   });
+
+  await touchEntityRow('purchase_requests', pr.id, actorUserId);
+  await deliverTrackedNotifications([
+    {
+      userId: pr.created_by,
+      type: 'pr_approved',
+      message: `Purchase Request ${pr.id} was fully approved (administrator force approve).`,
+      emailSubject: 'PR Approved',
+    },
+  ]);
 
   return { prId: pr.id, status: 'approved', approval: updatedApproval as Record<string, unknown> };
 }
@@ -268,8 +275,9 @@ async function performAdminRejectEntirePr(params: {
   pr: { id: string; created_by: string; status: string };
   actorUserId: string;
   reason: string;
+  departmentScope: string | null;
 }): Promise<{ prId: string; status: 'rejected'; approval: null }> {
-  const { pr, actorUserId, reason } = params;
+  const { pr, actorUserId, reason, departmentScope } = params;
   if (pr.status !== 'pending' && pr.status !== 'pending_exception') {
     throw new AppError(`PR is not rejectable (status=${pr.status})`, 409);
   }
@@ -300,22 +308,33 @@ async function performAdminRejectEntirePr(params: {
       })
       .in('id', pendingIds);
     if (apRej) throw apRej;
+    await writeApprovalAuditLogs({
+      approvalIds: pendingIds,
+      action: 'rejected',
+      userId: actorUserId,
+      reason: 'admin_reject_entire_pr',
+      departmentScope,
+    });
   }
 
-  await notifyUser({
-    userId: pr.created_by,
-    type: 'pr_rejected',
-    message: `Purchase Request ${pr.id} was rejected by an administrator.`,
-    emailSubject: 'PR Rejected',
-  });
-
-  await writeAuditLog({
-    action: 'pr_rejected',
-    userId: actorUserId,
-    entity: 'purchase_request',
-    entityType: 'purchase_request',
-    entityId: pr.id,
-    changes: { status: { after: 'rejected' }, via: 'admin_reject_entire_pr' },
+  await recordTrackedAction({
+    audit: {
+      action: 'pr_rejected',
+      userId: actorUserId,
+      entity: 'purchase_request',
+      entityType: 'purchase_request',
+      entityId: pr.id,
+      changes: { status: { after: 'rejected' }, via: 'admin_reject_entire_pr' },
+      departmentScope,
+    },
+    notify: [
+      {
+        userId: pr.created_by,
+        type: 'pr_rejected',
+        message: `Purchase Request ${pr.id} was rejected by an administrator.`,
+        emailSubject: 'PR Rejected',
+      },
+    ],
   });
 
   return { prId: pr.id, status: 'rejected', approval: null };
@@ -351,7 +370,9 @@ export async function decideApproval(params: {
     throw new AppError(`PR is not in a deciable state (status=${pr.status})`, 409);
   }
 
-  if (actorRole === 'admin' && decisionNormalized === 'rejected') {
+  const departmentScope = await departmentScopeForProjectId(pr.project_id as string);
+
+  if (bypassesDepartmentScope(actorRole) && decisionNormalized === 'rejected') {
     return performAdminRejectEntirePr({
       pr: {
         id: pr.id as string,
@@ -360,10 +381,11 @@ export async function decideApproval(params: {
       },
       actorUserId,
       reason: comments?.trim() || 'No reason provided.',
+      departmentScope,
     });
   }
 
-  if (actorRole === 'admin' && decisionNormalized === 'approved') {
+  if (bypassesDepartmentScope(actorRole) && decisionNormalized === 'approved') {
     const isAssignee = approval.approver_id === actorUserId;
     const useForcePath = !isAssignee || approval.role === 'admin';
     if (useForcePath) {
@@ -377,6 +399,7 @@ export async function decideApproval(params: {
         actorUserId,
         comments: comments ?? null,
         touchedApprovalId: approval.id as string,
+        departmentScope,
       });
     }
   }
@@ -433,6 +456,21 @@ export async function decideApproval(params: {
   const updatedApproval = updatedApprovals![0];
 
   if (decisionNormalized === 'rejected') {
+    await writeApprovalAuditLogs({
+      approvalIds: [approval.id as string],
+      action: 'rejected',
+      userId: actorUserId,
+      departmentScope,
+    });
+
+    const { data: cascadePending, error: cascadeSelErr } = await supabaseAdmin
+      .from('approvals')
+      .select('id')
+      .eq('request_id', pr.id)
+      .eq('status', 'pending');
+    if (cascadeSelErr) throw cascadeSelErr;
+    const cascadeIds = (cascadePending ?? []).map((r) => r.id as string);
+
     const { error: prRejErr } = await supabaseAdmin
       .from('purchase_requests')
       .update({ status: 'rejected', updated_by: actorUserId })
@@ -449,20 +487,34 @@ export async function decideApproval(params: {
       .eq('request_id', pr.id)
       .eq('status', 'pending');
 
-    await notifyUser({
-      userId: pr.created_by,
-      type: 'pr_rejected',
-      message: `Purchase Request ${pr.id} was rejected at the ${approval.role} stage.`,
-      emailSubject: 'PR Rejected',
-    });
+    if (cascadeIds.length > 0) {
+      await writeApprovalAuditLogs({
+        approvalIds: cascadeIds,
+        action: 'rejected',
+        userId: actorUserId,
+        reason: 'cascade_after_stage_rejection',
+        departmentScope,
+      });
+    }
 
-    await writeAuditLog({
-      action: 'pr_rejected',
-      userId: actorUserId,
-      entity: 'purchase_request',
-      entityType: 'purchase_request',
-      entityId: pr.id,
-      changes: { status: { after: 'rejected' }, stage: approval.role },
+    await recordTrackedAction({
+      audit: {
+        action: 'pr_rejected',
+        userId: actorUserId,
+        entity: 'purchase_request',
+        entityType: 'purchase_request',
+        entityId: pr.id as string,
+        changes: { status: { after: 'rejected' }, stage: approval.role },
+        departmentScope,
+      },
+      notify: [
+        {
+          userId: pr.created_by as string,
+          type: 'pr_rejected',
+          message: `Purchase Request ${pr.id} was rejected at the ${approval.role} stage.`,
+          emailSubject: 'PR Rejected',
+        },
+      ],
     });
 
     return { prId: pr.id, status: 'rejected' as const, approval: updatedApproval };
@@ -481,20 +533,32 @@ export async function decideApproval(params: {
       .single();
     if (nextErr || !nextApproval) throw nextErr ?? new AppError('Next approval stage missing', 500);
 
-    await notifyUser({
-      userId: nextApproval.approver_id,
-      type: 'pr_approval_pending',
-      message: `Purchase Request ${pr.id} is ready for your ${humanizeStageLabel(nextRole as ApprovalStageRole)}.`,
-      emailSubject: 'PR Approval Pending',
+    await recordTrackedAction({
+      audit: {
+        action: 'approval_stage_approved',
+        userId: actorUserId,
+        entity: 'purchase_request',
+        entityType: 'purchase_request',
+        entityId: pr.id as string,
+        changes: { stage: approval.role, approvalStatus: { after: 'approved' } },
+        departmentScope,
+      },
+      touch: { table: 'purchase_requests', id: pr.id as string },
+      notify: [
+        {
+          userId: nextApproval.approver_id as string,
+          type: 'pr_approval_pending',
+          message: `Purchase Request ${pr.id} is ready for your ${humanizeStageLabel(nextRole as ApprovalStageRole)}.`,
+          emailSubject: 'PR Approval Pending',
+        },
+      ],
     });
 
-    await writeAuditLog({
-      action: 'approval_stage_approved',
+    await writeApprovalAuditLogs({
+      approvalIds: [approval.id as string],
+      action: 'approved',
       userId: actorUserId,
-      entity: 'purchase_request',
-      entityType: 'purchase_request',
-      entityId: pr.id,
-      changes: { stage: approval.role, approvalStatus: { after: 'approved' } },
+      departmentScope,
     });
 
     return { prId: pr.id, status: 'pending' as const, approval: updatedApproval };
@@ -511,11 +575,11 @@ export async function decideApproval(params: {
     throw e;
   }
 
-  await notifyUser({
-    userId: pr.created_by,
-    type: 'pr_approved',
-    message: `Purchase Request ${pr.id} was fully approved.`,
-    emailSubject: 'PR Approved',
+  await writeApprovalAuditLogs({
+    approvalIds: [approval.id as string],
+    action: 'approved',
+    userId: actorUserId,
+    departmentScope,
   });
 
   await writeAuditLog({
@@ -523,9 +587,10 @@ export async function decideApproval(params: {
     userId: actorUserId,
     entity: 'purchase_request',
     entityType: 'purchase_request',
-    entityId: pr.id,
+    entityId: pr.id as string,
     reason: auditPayloadPreview(rpcResult),
     changes: { finalize: rpcResult },
+    departmentScope,
   });
 
   await writeAuditLog({
@@ -533,9 +598,20 @@ export async function decideApproval(params: {
     userId: actorUserId,
     entity: 'purchase_request',
     entityType: 'purchase_request',
-    entityId: pr.id,
+    entityId: pr.id as string,
     changes: { status: { after: 'approved' } },
+    departmentScope,
   });
+
+  await touchEntityRow('purchase_requests', pr.id as string, actorUserId);
+  await deliverTrackedNotifications([
+    {
+      userId: pr.created_by as string,
+      type: 'pr_approved',
+      message: `Purchase Request ${pr.id} was fully approved.`,
+      emailSubject: 'PR Approved',
+    },
+  ]);
 
   return { prId: pr.id, status: 'approved' as const, approval: updatedApproval };
 }
@@ -555,6 +631,8 @@ export async function adminOverridePurchaseRequest(params: {
     .eq('id', requestId)
     .single();
   if (prErr || !pr) throw prErr ?? new AppError('Purchase request not found', 404);
+
+  const departmentScope = await departmentScopeForProjectId(pr.project_id as string);
 
   if (decisionNormalized === 'rejected') {
     const { data: pendingRejectIds, error: pendRejErr } = await supabaseAdmin
@@ -582,7 +660,23 @@ export async function adminOverridePurchaseRequest(params: {
         })
         .in('id', rejIds);
       if (approvalsCloseErr) throw approvalsCloseErr;
+      await writeApprovalAuditLogs({
+        approvalIds: rejIds,
+        action: 'rejected',
+        userId: actorUserId,
+        reason: 'admin_override',
+        departmentScope,
+      });
     }
+
+    await deliverTrackedNotifications([
+      {
+        userId: pr.created_by as string,
+        type: 'pr_rejected',
+        message: `Purchase Request ${pr.id} was rejected by an administrator (override).`,
+        emailSubject: 'PR Rejected',
+      },
+    ]);
   } else {
     if (pr.status === 'approved' && pr.budget_deducted) {
       const { data: updatedPr, error: updatedPrErr } = await supabaseAdmin
@@ -598,6 +692,7 @@ export async function adminOverridePurchaseRequest(params: {
         entityType: 'purchase_request',
         entityId: pr.id,
         reason: `${reason} (no-op: already approved and budget applied)`,
+        departmentScope,
       });
       return { prId: updatedPr.id, status: updatedPr.status, reason };
     }
@@ -637,6 +732,16 @@ export async function adminOverridePurchaseRequest(params: {
       throw e;
     }
 
+    if (approveIds.length > 0) {
+      await writeApprovalAuditLogs({
+        approvalIds: approveIds,
+        action: 'approved',
+        userId: actorUserId,
+        reason: 'admin_override',
+        departmentScope,
+      });
+    }
+
     await writeAuditLog({
       action: 'budget_deducted_after_pr_approval',
       userId: actorUserId,
@@ -645,7 +750,17 @@ export async function adminOverridePurchaseRequest(params: {
       entityId: pr.id,
       reason: auditPayloadPreview({ ...rpcResult, via: 'admin_override' }),
       changes: { via: 'admin_override', finalize: rpcResult },
+      departmentScope,
     });
+
+    await deliverTrackedNotifications([
+      {
+        userId: pr.created_by as string,
+        type: 'pr_approved',
+        message: `Purchase Request ${pr.id} was fully approved (administrator override).`,
+        emailSubject: 'PR Approved',
+      },
+    ]);
   }
 
   const { data: updatedPr, error: updatedPrErr } = await supabaseAdmin
@@ -662,6 +777,7 @@ export async function adminOverridePurchaseRequest(params: {
     entityType: 'purchase_request',
     entityId: pr.id,
     reason,
+    departmentScope,
   });
 
   return {

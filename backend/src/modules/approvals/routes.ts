@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { adminOverridePurchaseRequest, decideApproval } from './engine';
 import { supabaseAdmin } from '../../config/supabase';
 import { enrichPurchaseRequestsWithPoLine } from '../purchaseRequests/poLineContext';
+import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
+import { bypassesDepartmentScope } from '../auth/types';
 
 export const approvalsRouter = Router();
 
@@ -20,16 +22,16 @@ const OverrideSchema = z.object({
   reason: z.string().min(1).max(2000),
 });
 
-approvalsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res, next) => {
+approvalsRouter.get('/', requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res, next) => {
   try {
     const userId = req.auth!.userId;
     const role = req.auth!.role;
     let q = supabaseAdmin
       .from('approvals')
-      .select('id, request_id, approver_id, role, status, comments, created_at, is_admin_override')
+      .select('id, request_id, approver_id, role, status, comments, created_at, updated_at, updated_by, is_admin_override')
       .order('created_at', { ascending: false })
       .limit(200);
-    if (role !== 'admin') q = q.eq('approver_id', userId);
+    if (!bypassesDepartmentScope(role)) q = q.eq('approver_id', userId);
     const { data, error } = await q;
     if (error) throw error;
     const rows = data ?? [];
@@ -75,7 +77,8 @@ approvalsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res
         });
       }
     }
-    const enriched = rows.map((a) => ({
+    const withAudit = await attachLastUpdatedFields('approval', rows);
+    const enriched = withAudit.map((a) => ({
       ...a,
       purchase_request: prMap.get(a.request_id as string) ?? null,
     }));
@@ -106,7 +109,7 @@ approvalsRouter.post(
 
 approvalsRouter.post(
   '/:id/decision',
-  requireRole('admin', 'pm', 'employee'),
+  requireRole('admin', 'pm', 'dept_head', 'employee'),
   async (req, res, next) => {
     try {
       const approvalId = req.params.id as string;

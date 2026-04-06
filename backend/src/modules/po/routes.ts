@@ -9,9 +9,11 @@ import { groupPurchaseOrdersByPo, type PurchaseOrderDbRow } from './groupByPo';
 import { parsePoUploadFile, calcRemainingAmount, type ParsedLineItemRow } from './service';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
-import { writeAuditLog } from '../auditLogs/service';
-import { notifyAllAdmins } from '../notifications/service';
-import type { UserRole } from '../auth/types';
+import { recordTrackedAction } from '../auditLogs/trackedAction';
+import { getAdminUserIds } from '../notifications/service';
+import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
+import { getLastTransactionForPO } from './lastTransaction';
+import { bypassesDepartmentScope, isDeptManagerRole, type UserRole } from '../auth/types';
 
 export const poRouter = Router();
 
@@ -114,7 +116,7 @@ async function handleLineItemUpload(params: {
   firstEntityId: string | null;
 }> {
   const { rows, actorUserId, actorRole, actorDepartment } = params;
-  const enforceDept = actorRole === 'pm' ? actorDepartment : null;
+  const enforceDept = isDeptManagerRole(actorRole) ? actorDepartment : null;
 
   let inserted = 0;
   let updated = 0;
@@ -166,7 +168,7 @@ async function handleLineItemUpload(params: {
   return { totalRows: rows.length, inserted, updated, failed, firstEntityId };
 }
 
-poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), async (req, res, next) => {
+poRouter.post('/upload', requireRole('admin', 'pm', 'dept_head'), upload.single('file'), async (req, res, next) => {
   try {
     const actorUserId = req.auth!.userId;
     const actorRole = req.auth!.role;
@@ -180,8 +182,8 @@ poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), asyn
     });
 
     if (parsed.mode === 'line_items') {
-      if (actorRole === 'pm' && !actorDepartment) {
-        throw new AppError('PM profile must include a department for PO upload', 400);
+      if (isDeptManagerRole(actorRole) && !actorDepartment) {
+        throw new AppError('Profile must include a department for PO upload', 400);
       }
 
       const result = await handleLineItemUpload({
@@ -199,19 +201,30 @@ poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), asyn
 
       const actorLabel = String(actor?.name ?? actor?.email ?? actorUserId);
 
-      if (actorRole === 'pm') {
-        await notifyAllAdmins({
-          type: 'pm_po_upload',
-          message: `PM uploaded new PO data (${result.inserted} inserted, ${result.updated} updated, ${result.failed} failed). Uploaded by ${actorLabel}.`,
-        });
-      }
+      const deptScope = isDeptManagerRole(actorRole) ? actorDepartment : null;
+      const adminIds = await getAdminUserIds();
+      const uploadSummary = `PO data upload (${result.inserted} inserted, ${result.updated} updated, ${result.failed} failed). Uploaded by ${actorLabel}.`;
+      const notifyEntries = adminIds.map((id) => ({
+        userId: id,
+        type: isDeptManagerRole(actorRole) ? 'pm_po_upload' : 'po_upload',
+        message: uploadSummary,
+        emailSubject: 'PO data uploaded',
+      }));
 
       if (result.firstEntityId) {
-        await writeAuditLog({
-          action: 'po_uploaded',
-          userId: actorUserId,
-          entity: 'purchase_order',
-          entityId: result.firstEntityId,
+        const action = result.updated > 0 ? 'updated' : result.inserted > 0 ? 'created' : 'updated';
+        await recordTrackedAction({
+          audit: {
+            action,
+            userId: actorUserId,
+            entity: 'purchase_order',
+            entityType: 'purchase_order',
+            entityId: result.firstEntityId,
+            changes: { inserted: result.inserted, updated: result.updated, failed: result.failed },
+            departmentScope: deptScope,
+          },
+          touch: { table: 'purchase_orders', id: result.firstEntityId },
+          notify: notifyEntries,
         });
       }
 
@@ -225,7 +238,7 @@ poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), asyn
       });
     }
 
-    if (actorRole !== 'admin') {
+    if (!bypassesDepartmentScope(actorRole)) {
       throw new AppError('Only admins may use legacy vendor/total_value CSV layout.', 403);
     }
 
@@ -317,11 +330,25 @@ poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), asyn
 
     if (touchedIds.length === 0) throw new AppError('PO upload produced no changes', 500);
 
-    await writeAuditLog({
-      action: 'po_uploaded',
-      userId: actorUserId,
-      entity: 'purchase_order',
-      entityId: touchedIds[0],
+    const adminIds = await getAdminUserIds();
+    const legacyMsg = `Legacy PO upload (${added} added, ${updated} updated).`;
+    await recordTrackedAction({
+      audit: {
+        action: updated > 0 ? 'updated' : 'created',
+        userId: actorUserId,
+        entity: 'purchase_order',
+        entityType: 'purchase_order',
+        entityId: touchedIds[0],
+        changes: { inserted: added, updated, mode: 'legacy_vendor' },
+        departmentScope: null,
+      },
+      touch: { table: 'purchase_orders', id: touchedIds[0] },
+      notify: adminIds.map((id) => ({
+        userId: id,
+        type: 'po_upload_legacy',
+        message: legacyMsg,
+        emailSubject: 'PO upload',
+      })),
     });
 
     res.json({
@@ -339,7 +366,7 @@ poRouter.post('/upload', requireRole('admin', 'pm'), upload.single('file'), asyn
   }
 });
 
-poRouter.get('/search', requireRole('admin', 'pm', 'employee'), async (req, res, next) => {
+poRouter.get('/search', requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res, next) => {
   try {
     const projectId = z.string().uuid().parse(req.query.project_id);
     const qRaw = req.query.q;
@@ -360,7 +387,7 @@ poRouter.get('/search', requireRole('admin', 'pm', 'employee'), async (req, res,
   }
 });
 
-poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res) => {
+poRouter.get('/', requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res) => {
   const actorRole = req.auth!.role;
   const actorUserId = req.auth!.userId;
   const actorDepartment = req.auth!.department ?? null;
@@ -368,12 +395,12 @@ poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res) => {
   let q = supabaseAdmin
     .from('purchase_orders')
     .select(
-      'id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at, updated_at, po, po_line_sn, item_code, description, unit_price, line_no, department, po_amount, remaining_amount, issue_date, customer',
+      'id, po_number, vendor, total_value, remaining_value, uploaded_by, created_at, updated_at, updated_by, po, po_line_sn, item_code, description, unit_price, line_no, department, po_amount, remaining_amount, issue_date, customer',
     )
     .order('created_at', { ascending: false })
     .limit(500);
 
-  if (actorRole !== 'admin') {
+  if (!bypassesDepartmentScope(actorRole)) {
     let fromProjects: string[] = [];
     if (actorDepartment) {
       if (actorRole === 'employee') {
@@ -394,7 +421,7 @@ poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res) => {
         const { data: projs, error: pErr } = await supabaseAdmin
           .from('projects')
           .select('po_id')
-          .eq('department', actorDepartment)
+          .eq('department_id', actorDepartment)
           .not('po_id', 'is', null);
         if (pErr) throw pErr;
         fromProjects = [...new Set((projs ?? []).map((p) => p.po_id as string).filter(Boolean))];
@@ -409,6 +436,50 @@ poRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res) => {
   const { data, error } = await q;
   if (error) throw error;
   const rows = data ?? [];
-  const purchaseOrders = groupPurchaseOrdersByPo(rows as PurchaseOrderDbRow[]);
-  res.json({ purchaseOrders });
+  const enrichedRows = await attachLastUpdatedFields('purchase_order', rows);
+  const purchaseOrders = groupPurchaseOrdersByPo(enrichedRows as unknown as PurchaseOrderDbRow[]);
+  const rowMap = new Map(enrichedRows.map((r) => [r.id, r]));
+
+  const withGroupLastUpdated = purchaseOrders.map((g) => {
+    let bestAt = '';
+    let bestBy: (typeof enrichedRows)[0]['last_updated_by'] = null;
+    for (const it of g.items) {
+      const row = rowMap.get(it.id);
+      if (!row) continue;
+      const at = row.last_updated_at ?? '';
+      if (at && at > bestAt) {
+        bestAt = at;
+        bestBy = row.last_updated_by ?? null;
+      }
+    }
+    const fallbackAt = g.updated_at;
+    return {
+      ...g,
+      last_updated_at: bestAt || fallbackAt || null,
+      last_updated_by: bestAt ? bestBy : null,
+    };
+  });
+
+  const withLastTx = await Promise.all(
+    withGroupLastUpdated.map(async (g) => {
+      const bundle = await getLastTransactionForPO(g.anchor_po_line_id);
+      return {
+        ...g,
+        po_last_transaction: {
+          po_id: bundle.po_id,
+          po_number: bundle.po_number ?? g.po,
+          last_transaction: bundle.last_transaction,
+        },
+      };
+    }),
+  );
+
+  withLastTx.sort((a, b) => {
+    const ta = a.po_last_transaction.last_transaction?.timestamp ?? '';
+    const tb = b.po_last_transaction.last_transaction?.timestamp ?? '';
+    if (tb !== ta) return tb.localeCompare(ta);
+    return String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? ''));
+  });
+
+  res.json({ purchaseOrders: withLastTx });
 });

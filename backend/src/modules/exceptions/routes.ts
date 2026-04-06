@@ -8,7 +8,7 @@ export const exceptionsRouter = Router();
 
 exceptionsRouter.use(requireAuth);
 
-exceptionsRouter.get('/', requireRole('admin', 'pm'), async (req, res, next) => {
+exceptionsRouter.get('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const exceptions = await listPendingExceptionsForActor({
       actorRole: req.auth!.role,
@@ -24,7 +24,7 @@ const ExceptionActionSchema = z.object({
   reason: z.string().max(2000).optional(),
 });
 
-exceptionsRouter.post('/:id/approve', requireRole('admin', 'pm'), async (req, res, next) => {
+exceptionsRouter.post('/:id/approve', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const exceptionId = req.params.id as string;
     ExceptionActionSchema.parse(req.body ?? {});
@@ -41,7 +41,7 @@ exceptionsRouter.post('/:id/approve', requireRole('admin', 'pm'), async (req, re
   }
 });
 
-exceptionsRouter.post('/:id/reject', requireRole('admin', 'pm'), async (req, res, next) => {
+exceptionsRouter.post('/:id/reject', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const exceptionId = req.params.id as string;
     ExceptionActionSchema.parse(req.body ?? {});

@@ -1,10 +1,10 @@
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
-import type { UserRole } from '../auth/types';
+import { bypassesDepartmentScope, isDeptManagerRole, type UserRole } from '../auth/types';
 
 export type ProjectRow = {
   id: string;
-  department: string;
+  department_id: string;
   team_lead_id: string | null;
   /** Responsible PM for approval chain; may be null before DB migration backfill. */
   pm_id: string | null;
@@ -19,7 +19,7 @@ export function isTeamLeadOnProject(params: { projectTeamLeadId: string | null; 
 export async function fetchProjectOrThrow(projectId: string): Promise<ProjectRow> {
   const { data: project, error } = await supabaseAdmin
     .from('projects')
-    .select('id, department, team_lead_id, pm_id, created_by, status')
+    .select('id, department_id, team_lead_id, pm_id, created_by, status')
     .eq('id', projectId)
     .single();
   if (error || !project) throw error ?? new AppError('Project not found', 404);
@@ -33,10 +33,10 @@ export async function assertActorMayManageProject(params: {
   project: ProjectRow;
 }) {
   const { actorUserId, actorRole, actorDepartment, project } = params;
-  if (actorRole === 'admin') return;
-  if (actorRole === 'pm') {
-    if (!actorDepartment || actorDepartment !== project.department) {
-      throw new AppError('PM can only manage projects in their own department', 403);
+  if (bypassesDepartmentScope(actorRole)) return;
+  if (isDeptManagerRole(actorRole)) {
+    if (!actorDepartment || actorDepartment !== project.department_id) {
+      throw new AppError('You can only manage projects in your own department', 403);
     }
     return;
   }

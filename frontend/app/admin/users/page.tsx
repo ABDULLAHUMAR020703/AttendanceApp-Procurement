@@ -26,7 +26,7 @@ const DEPARTMENTS: Department[] = [
   'fixed_network',
   'warehouse',
 ];
-const ROLES: UserRole[] = ['admin', 'pm', 'employee'];
+const ROLES: UserRole[] = ['admin', 'pm', 'dept_head', 'employee'];
 
 type UserRow = {
   id: string;

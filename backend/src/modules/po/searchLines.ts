@@ -35,7 +35,7 @@ export async function searchPoLinesForProject(params: {
 
   const { data: project, error: pErr } = await supabaseAdmin
     .from('projects')
-    .select('id, po_id, department')
+    .select('id, po_id, department_id')
     .eq('id', projectId)
     .single();
   if (pErr || !project) throw pErr ?? new AppError('Project not found', 404);

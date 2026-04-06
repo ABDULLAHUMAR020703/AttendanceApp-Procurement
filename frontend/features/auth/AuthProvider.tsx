@@ -5,7 +5,7 @@ import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { useQueryClient } from '@tanstack/react-query';
 import { getBrowserSupabase } from '../../lib/supabase-browser';
 
-export type UserRole = 'admin' | 'pm' | 'employee';
+export type UserRole = 'admin' | 'pm' | 'dept_head' | 'employee';
 
 export type Department =
   | 'sales'

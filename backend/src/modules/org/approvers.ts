@@ -33,7 +33,7 @@ export async function buildApprovalStagesForProject(project: ProjectRow): Promis
     out.push({ role: 'team_lead', approver_id: project.team_lead_id });
   }
 
-  const pmId = project.pm_id ?? (await resolvePmUserIdForDepartment(project.department));
+  const pmId = project.pm_id ?? (await resolvePmUserIdForDepartment(project.department_id));
   out.push({ role: 'pm', approver_id: pmId });
 
   return out;

@@ -9,6 +9,8 @@ declare global {
         department?: string | null;
         name?: string | null;
         email?: string | null;
+        /** True for admin — omit department filters and skip department-only access checks. */
+        orgWideAccess?: boolean;
       };
     }
   }

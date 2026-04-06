@@ -10,6 +10,8 @@ export type AuditLogInsert = {
   reason?: string;
   /** Optional before/after or field-level JSON. */
   changes?: Record<string, unknown> | null;
+  /** Denormalized for department-scoped activity feeds (dashboard). */
+  departmentScope?: string | null;
 };
 
 export async function writeAuditLog(params: AuditLogInsert) {
@@ -22,7 +24,33 @@ export async function writeAuditLog(params: AuditLogInsert) {
     entity_id: params.entityId,
     reason: params.reason ?? null,
     changes: params.changes ?? null,
+    department_scope: params.departmentScope ?? null,
     timestamp: new Date().toISOString(),
   });
   if (error) throw error;
+}
+
+/** One audit row per approval id (e.g. after bulk approve/reject). */
+export async function writeApprovalAuditLogs(params: {
+  approvalIds: string[];
+  action: 'approved' | 'rejected' | 'updated';
+  userId: string;
+  reason?: string | null;
+  departmentScope?: string | null;
+}) {
+  const ids = [...new Set(params.approvalIds.filter(Boolean))];
+  if (ids.length === 0) return;
+  await Promise.all(
+    ids.map((entityId) =>
+      writeAuditLog({
+        action: params.action,
+        userId: params.userId,
+        entity: 'approval',
+        entityType: 'approval',
+        entityId,
+        reason: params.reason ?? undefined,
+        departmentScope: params.departmentScope ?? null,
+      }),
+    ),
+  );
 }

@@ -1,7 +1,7 @@
 import type { RequestHandler } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AppError } from '../utils/errors';
-import type { UserRole } from '../modules/auth/types';
+import { bypassesDepartmentScope, type UserRole } from '../modules/auth/types';
 
 export const requireAuth: RequestHandler = async (req, _res, next) => {
   const header = req.header('Authorization');
@@ -27,12 +27,14 @@ export const requireAuth: RequestHandler = async (req, _res, next) => {
     return next(new AppError('User profile not found in `users` table', 401, profileErr ?? undefined));
   }
 
+  const role = profile.role as UserRole;
   req.auth = {
     userId,
-    role: profile.role as UserRole,
+    role,
     department: profile.department ?? null,
     name: profile.name ?? null,
     email: profile.email ?? null,
+    orgWideAccess: bypassesDepartmentScope(role),
   };
 
   return next();

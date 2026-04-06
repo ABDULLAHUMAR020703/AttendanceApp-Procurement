@@ -30,12 +30,17 @@ export async function enqueueEmailPlaceholder(params: {
   if (error) throw error;
 }
 
-export async function notifyAllAdmins(params: { type: string; message: string }) {
+export async function getAdminUserIds(): Promise<string[]> {
   const { data, error } = await supabaseAdmin.from('users').select('id').eq('role', 'admin');
   if (error) throw error;
-  for (const row of data ?? []) {
+  return (data ?? []).map((r) => r.id as string);
+}
+
+export async function notifyAllAdmins(params: { type: string; message: string }) {
+  const ids = await getAdminUserIds();
+  for (const id of ids) {
     await createInAppNotification({
-      userId: row.id as string,
+      userId: id,
       type: params.type,
       message: params.message,
     });

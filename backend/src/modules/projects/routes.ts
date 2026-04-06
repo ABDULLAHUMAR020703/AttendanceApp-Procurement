@@ -12,6 +12,8 @@ import {
 } from './service';
 import { assertActorMayViewProject, fetchProjectForAccess, loadEmployeeVisibleProjectIds } from './projectAccess';
 import { budgetPairFromRow, type PurchaseOrderDbRow } from '../po/groupByPo';
+import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
+import { bypassesDepartmentScope, isDeptManagerRole } from '../auth/types';
 
 export const projectsRouter = Router();
 
@@ -32,13 +34,13 @@ const DepartmentSchema = z.enum([
   'warehouse',
 ]);
 
-projectsRouter.post('/', requireRole('admin', 'pm'), async (req, res, next) => {
+projectsRouter.post('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const Schema = z.object({
       name: z.string().min(1).max(200),
       po_id: z.string().uuid().optional().nullable(),
       budget: z.coerce.number().positive().optional(),
-      department: DepartmentSchema.optional(),
+      department_id: DepartmentSchema,
       pm_id: z.string().uuid(),
       team_lead_id: z.string().uuid(),
       assigned_employee_ids: z.array(z.string().uuid()).optional().default([]),
@@ -60,7 +62,7 @@ projectsRouter.post('/', requireRole('admin', 'pm'), async (req, res, next) => {
       createdBy: actorUserId,
       actorRole,
       actorDepartment,
-      department: parsed.department ?? null,
+      departmentId: parsed.department_id,
       pmId: parsed.pm_id,
       teamLeadId: parsed.team_lead_id,
       assignedEmployeeIds: parsed.assigned_employee_ids ?? [],
@@ -72,7 +74,7 @@ projectsRouter.post('/', requireRole('admin', 'pm'), async (req, res, next) => {
   }
 });
 
-projectsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res, next) => {
+projectsRouter.get('/', requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res, next) => {
   try {
     const role = req.auth!.role;
     const dept = req.auth!.department ?? null;
@@ -81,7 +83,7 @@ projectsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res,
     let q = supabaseAdmin
       .from('projects')
       .select(
-        'id, name, po_id, budget, status, is_exception, created_by, created_at, department, team_lead_id, pm_id, updated_at, updated_by',
+        'id, name, po_id, budget, status, is_exception, created_by, created_at, department_id, team_lead_id, pm_id, updated_at, updated_by',
       )
       .neq('status', 'archived')
       .order('created_at', { ascending: false })
@@ -92,9 +94,9 @@ projectsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res,
       const visible = await loadEmployeeVisibleProjectIds({ userId, department: dept });
       if (visible.length === 0) return res.json({ projects: [] });
       q = q.in('id', visible);
-    } else if (role !== 'admin') {
+    } else if (!bypassesDepartmentScope(role) && isDeptManagerRole(role)) {
       if (!dept) throw new AppError('User profile must include a department', 400);
-      q = q.eq('department', dept);
+      q = q.eq('department_id', dept);
     }
 
     const { data: projects, error } = await q;
@@ -159,12 +161,28 @@ projectsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res,
       }
     }
 
-    const enriched = list.map((p) => ({
-      ...p,
-      purchase_order: p.po_id ? poMap.get(p.po_id) ?? null : null,
-      pm: p.pm_id ? userMap.get(p.pm_id as string) ?? null : null,
-      team_lead: p.team_lead_id ? userMap.get(p.team_lead_id as string) ?? null : null,
-    }));
+    const deptCodes = [...new Set(list.map((p) => p.department_id as string).filter(Boolean))];
+    let deptLabelMap = new Map<string, string>();
+    if (deptCodes.length > 0) {
+      const { data: deptRows, error: dErr } = await supabaseAdmin
+        .from('departments')
+        .select('code, display_name')
+        .in('code', deptCodes);
+      if (dErr) throw dErr;
+      deptLabelMap = new Map((deptRows ?? []).map((r) => [r.code as string, r.display_name as string]));
+    }
+
+    const withAudit = await attachLastUpdatedFields('project', list);
+    const enriched = withAudit.map((p) => {
+      const did = p.department_id as string;
+      return {
+        ...p,
+        department_label: deptLabelMap.get(did) ?? did,
+        purchase_order: p.po_id ? poMap.get(p.po_id) ?? null : null,
+        pm: p.pm_id ? userMap.get(p.pm_id as string) ?? null : null,
+        team_lead: p.team_lead_id ? userMap.get(p.team_lead_id as string) ?? null : null,
+      };
+    });
 
     res.json({ projects: enriched });
   } catch (err) {
@@ -172,7 +190,7 @@ projectsRouter.get('/', requireRole('admin', 'pm', 'employee'), async (req, res,
   }
 });
 
-projectsRouter.get('/:id', requireRole('admin', 'pm', 'employee'), async (req, res, next) => {
+projectsRouter.get('/:id', requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const role = req.auth!.role;
@@ -190,7 +208,7 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'employee'), async (req, r
     const { data: project, error } = await supabaseAdmin
       .from('projects')
       .select(
-        'id, name, po_id, budget, status, is_exception, created_by, created_at, department, team_lead_id, pm_id, updated_at, updated_by',
+        'id, name, po_id, budget, status, is_exception, created_by, created_at, department_id, team_lead_id, pm_id, updated_at, updated_by',
       )
       .eq('id', id)
       .maybeSingle();
@@ -200,7 +218,7 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'employee'), async (req, r
     const { data: deptRow } = await supabaseAdmin
       .from('departments')
       .select('code, display_name')
-      .eq('code', project.department as string)
+      .eq('code', project.department_id as string)
       .maybeSingle();
 
     const { data: assignRows } = await supabaseAdmin
@@ -231,6 +249,8 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'employee'), async (req, r
       ? await supabaseAdmin.from('users').select('id, name, email, role').eq('id', ub).maybeSingle()
       : { data: null };
 
+    const [projectAudit] = await attachLastUpdatedFields('project', [project]);
+
     let purchaseOrder: Record<string, unknown> | null = null;
     if (project.po_id) {
       const { data: po } = await supabaseAdmin
@@ -243,7 +263,13 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'employee'), async (req, r
         const { data: poUpdater } = pob
           ? await supabaseAdmin.from('users').select('id, name, email, role').eq('id', pob).maybeSingle()
           : { data: null };
-        purchaseOrder = { ...po, updatedBy: poUpdater ?? null };
+        const [poAudit] = await attachLastUpdatedFields('purchase_order', [po]);
+        purchaseOrder = {
+          ...po,
+          updatedBy: poUpdater ?? null,
+          last_updated_at: poAudit.last_updated_at,
+          last_updated_by: poAudit.last_updated_by,
+        };
       }
     }
 
@@ -262,8 +288,10 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'employee'), async (req, r
     res.json({
       project: {
         ...project,
-        department_label: deptRow?.display_name ?? project.department,
+        department_label: deptRow?.display_name ?? project.department_id,
         updatedBy: updater ?? null,
+        last_updated_at: projectAudit.last_updated_at,
+        last_updated_by: projectAudit.last_updated_by,
         pm: pmProfile,
         team_lead: teamLeadProfile,
         assigned_employees: assignedEmployees,
@@ -277,7 +305,7 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'employee'), async (req, r
 
 projectsRouter.patch(
   '/:id/team-lead',
-  requireRole('admin', 'pm'),
+  requireRole('admin', 'pm', 'dept_head'),
   async (req, res, next) => {
     try {
       const id = z.string().uuid().parse(req.params.id);
@@ -299,7 +327,7 @@ projectsRouter.patch(
   },
 );
 
-projectsRouter.patch('/:id/members', requireRole('admin', 'pm'), async (req, res, next) => {
+projectsRouter.patch('/:id/members', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const Body = z.object({
@@ -319,7 +347,7 @@ projectsRouter.patch('/:id/members', requireRole('admin', 'pm'), async (req, res
   }
 });
 
-projectsRouter.delete('/:id', requireRole('admin', 'pm'), async (req, res, next) => {
+projectsRouter.delete('/:id', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const result = await archiveProject({
