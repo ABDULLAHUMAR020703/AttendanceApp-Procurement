@@ -3,7 +3,7 @@ import multer from 'multer';
 import { requireAuth } from '../../middleware/auth';
 import { requireRole } from '../../middleware/rbac';
 import { z } from 'zod';
-import { countPreviousPrsForSameItem, createPurchaseRequest, normalizeItemCode } from './service';
+import { buildPurchaseRequestPdf, countPreviousPrsForSameItem, createPurchaseRequest, normalizeItemCode } from './service';
 import {
   buildPrPoLineSummary,
   enrichPurchaseRequestsWithPoLine,
@@ -14,6 +14,7 @@ import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { bypassesDepartmentScope } from '../auth/types';
 import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
+import { recordTrackedAction } from '../auditLogs/trackedAction';
 
 export const purchaseRequestsRouter = Router();
 
@@ -177,6 +178,47 @@ purchaseRequestsRouter.get(
       }
       const previousCount = await countPreviousPrsForSameItem(req.auth!.userId, norm);
       res.json({ previousCount });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+purchaseRequestsRouter.get(
+  '/:id/pdf',
+  requireRole('admin', 'pm'),
+  async (req, res, next) => {
+    try {
+      const requestId = req.params.id as string;
+      if (!requestId) throw new AppError('Missing purchase request id', 400);
+
+      const pdfBuffer = await buildPurchaseRequestPdf({ requestId });
+
+      const { data: prScope } = await supabaseAdmin
+        .from('purchase_requests')
+        .select('id, project_id')
+        .eq('id', requestId)
+        .maybeSingle();
+      const { data: projectScope } = prScope?.project_id
+        ? await supabaseAdmin.from('projects').select('department_id').eq('id', prScope.project_id).maybeSingle()
+        : { data: null as { department_id?: string | null } | null };
+
+      await recordTrackedAction({
+        audit: {
+          action: 'purchase_request_pdf_downloaded',
+          userId: req.auth!.userId,
+          entity: 'purchase_request',
+          entityType: 'purchase_request',
+          entityId: requestId,
+          departmentScope: (projectScope?.department_id as string | null) ?? null,
+        },
+        touch: { table: 'purchase_requests', id: requestId },
+      });
+
+      const safeId = requestId.replace(/[^a-zA-Z0-9_-]/g, '');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename=\"PR_${safeId}.pdf\"`);
+      return res.status(200).send(pdfBuffer);
     } catch (err) {
       next(err);
     }

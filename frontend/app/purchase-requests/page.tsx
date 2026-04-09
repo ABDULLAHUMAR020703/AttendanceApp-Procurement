@@ -115,6 +115,8 @@ export default function PurchaseRequestsPage() {
   const [overrideReason, setOverrideReason] = useState('');
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const isAdmin = profile?.role === 'admin';
+  const canDownloadPdf = profile?.role === 'admin' || profile?.role === 'pm';
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const { data: projectsData } = useQuery({
     queryKey: ['projects', 'for-pr'],
@@ -387,6 +389,39 @@ export default function PurchaseRequestsPage() {
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Force approve failed'),
   });
 
+  const downloadPdfMutation = useMutation({
+    mutationFn: async (requestId: string) => {
+      if (!supabase) throw new Error('Not signed in');
+      const bearer = await getAccessTokenFromSupabaseSession(supabase);
+      const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
+      const res = await fetch(`${apiBase}/api/purchase-requests/${requestId}/pdf`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${bearer}` },
+      });
+      if (!res.ok) {
+        let msg = 'Failed to download PDF';
+        try {
+          const body = (await res.json()) as { message?: string };
+          if (body?.message) msg = body.message;
+        } catch {
+          // ignore parse errors
+        }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `PR_${requestId}.pdf`;
+      window.document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    },
+    onMutate: () => setDownloadError(null),
+    onError: (e: unknown) => setDownloadError(e instanceof Error ? e.message : 'Failed to download PDF'),
+  });
+
   return (
     <AppLayout>
       <PageContainer className="space-y-6">
@@ -609,7 +644,8 @@ export default function PurchaseRequestsPage() {
               />
             </div>
 
-            {error ? <div className="md:col-span-2 text-sm text-rose-300">{error}</div> : null}
+          {error ? <div className="md:col-span-2 text-sm text-rose-300">{error}</div> : null}
+          {downloadError ? <div className="md:col-span-2 text-sm text-rose-300">{downloadError}</div> : null}
 
             <Button
               className="md:col-span-2"
@@ -650,7 +686,7 @@ export default function PurchaseRequestsPage() {
                     <TH>Status</TH>
                     <TH className="min-w-[140px]">Last updated</TH>
                     <TH>Request</TH>
-                    {isAdmin ? <TH>Actions</TH> : null}
+                    {canDownloadPdf ? <TH>Actions</TH> : null}
                   </TR>
                 </THead>
                 <TBody>
@@ -670,40 +706,53 @@ export default function PurchaseRequestsPage() {
                           <>{pr.id.slice(0, 8)}…</>
                         )}
                       </TD>
-                      {isAdmin ? (
+                      {canDownloadPdf ? (
                         <TD>
                           <div className="flex flex-col gap-1 min-w-[9rem]">
                             <Button
                               type="button"
                               variant="secondary"
                               className="text-xs px-2 py-1"
-                              onClick={() => {
-                                setOverrideTarget(pr.id);
-                                setOverrideDecision('approved');
-                                setOverrideReason('');
-                              }}
+                              disabled={downloadPdfMutation.isPending}
+                              onClick={() => downloadPdfMutation.mutate(pr.id)}
                             >
-                              Override approval
+                              {downloadPdfMutation.isPending ? 'Generating PDF...' : 'Download PDF'}
                             </Button>
-                            <Button
-                              type="button"
-                              variant="success"
-                              className="text-xs px-2 py-1"
-                              disabled={
-                                forceApproveFromListMutation.isPending ||
-                                !(
-                                  (pr.status === 'pending' || pr.status === 'pending_exception') &&
-                                  firstPendingRequiredByPr.get(pr.id)
-                                )
-                              }
-                              title="Finalize immediately (admin only)"
-                              onClick={() => {
-                                const aid = firstPendingRequiredByPr.get(pr.id);
-                                if (aid) forceApproveFromListMutation.mutate(aid);
-                              }}
-                            >
-                              Force approve
-                            </Button>
+                            {isAdmin ? (
+                              <>
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  className="text-xs px-2 py-1"
+                                  onClick={() => {
+                                    setOverrideTarget(pr.id);
+                                    setOverrideDecision('approved');
+                                    setOverrideReason('');
+                                  }}
+                                >
+                                  Override approval
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="success"
+                                  className="text-xs px-2 py-1"
+                                  disabled={
+                                    forceApproveFromListMutation.isPending ||
+                                    !(
+                                      (pr.status === 'pending' || pr.status === 'pending_exception') &&
+                                      firstPendingRequiredByPr.get(pr.id)
+                                    )
+                                  }
+                                  title="Finalize immediately (admin only)"
+                                  onClick={() => {
+                                    const aid = firstPendingRequiredByPr.get(pr.id);
+                                    if (aid) forceApproveFromListMutation.mutate(aid);
+                                  }}
+                                >
+                                  Force approve
+                                </Button>
+                              </>
+                            ) : null}
                           </div>
                         </TD>
                       ) : null}

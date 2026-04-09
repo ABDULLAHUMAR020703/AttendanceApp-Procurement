@@ -9,7 +9,7 @@ import { Card } from '../../../components/ui/Card';
 import { PageContainer } from '../../../components/ui/PageContainer';
 import { PageHeader } from '../../../components/ui/PageHeader';
 import { useAuth } from '../../../features/auth/AuthProvider';
-import { authedFetchWithSupabase, formatPkr, NoSessionError } from '../../../lib/api';
+import { authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../../lib/api';
 import { useState } from 'react';
 import { AuditHistoryModal } from '../../../components/AuditHistoryModal';
 import { LastUpdatedMeta, LastUpdatedPanel } from '../../../components/LastUpdatedPanel';
@@ -97,6 +97,7 @@ export default function PurchaseRequestDetailsPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [projectHistoryOpen, setProjectHistoryOpen] = useState(false);
   const [poHistoryOpen, setPoHistoryOpen] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['purchase-request-detail', requestId],
@@ -137,6 +138,39 @@ export default function PurchaseRequestDetailsPage() {
     },
   });
 
+  const downloadPdfMutation = useMutation({
+    mutationFn: async () => {
+      if (!supabase) throw new Error('Not signed in');
+      const token = await getAccessTokenFromSupabaseSession(supabase);
+      const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
+      const res = await fetch(`${apiBase}/api/purchase-requests/${requestId}/pdf`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        let msg = 'Failed to download PDF';
+        try {
+          const body = (await res.json()) as { message?: string };
+          if (body?.message) msg = body.message;
+        } catch {
+          // ignore parse errors
+        }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `PR_${requestId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    },
+    onMutate: () => setDownloadError(null),
+    onError: (e: unknown) => setDownloadError(e instanceof Error ? e.message : 'Failed to download PDF'),
+  });
+
   if (!isAdmin) {
     return (
       <AppLayout>
@@ -157,7 +191,11 @@ export default function PurchaseRequestDetailsPage() {
               Back to list
             </Button>
           </Link>
+          <Button type="button" variant="secondary" onClick={() => downloadPdfMutation.mutate()} disabled={downloadPdfMutation.isPending}>
+            {downloadPdfMutation.isPending ? 'Generating PDF...' : 'Download PDF'}
+          </Button>
         </div>
+        {downloadError ? <Card className="p-3 text-sm text-rose-300">{downloadError}</Card> : null}
 
         {isLoading ? <Card className="p-4 text-sm text-muted-foreground">Loading...</Card> : null}
 
