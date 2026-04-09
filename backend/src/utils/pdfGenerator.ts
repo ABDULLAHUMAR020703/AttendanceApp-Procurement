@@ -44,8 +44,9 @@ function roleLabel(role: string): string {
   return role;
 }
 
-function escapeHtml(value: string): string {
-  return value
+function escapeHtml(value: unknown): string {
+  const s = value == null ? '' : String(value);
+  return s
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
@@ -89,21 +90,29 @@ function pageShell(title: string, body: string, watermark?: string): string {
 }
 
 async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim() || undefined;
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
   try {
+    browser = await puppeteer.launch({
+      headless: true,
+      executablePath,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+    });
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // Avoid networkidle0: static setContent often never reaches "idle" and can hang or time out → 500.
+    page.setDefaultNavigationTimeout(60_000);
+    await page.setContent(html, { waitUntil: 'load', timeout: 60_000 });
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
       margin: { top: '16mm', right: '12mm', bottom: '16mm', left: '12mm' },
     });
-    return Buffer.from(pdf);
+    return Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
+  } catch (err) {
+    console.error('PDF GENERATION ERROR (puppeteer):', err);
+    throw err;
   } finally {
-    await browser.close();
+    if (browser) await browser.close();
   }
 }
 
@@ -114,7 +123,7 @@ export async function generatePRPdf(data: PrPdfData): Promise<Buffer> {
       : data.approvals
           .map(
             (a) => `<tr>
-              <td>${escapeHtml(roleLabel(a.role))}</td>
+              <td>${escapeHtml(roleLabel(String(a.role ?? '')))}</td>
               <td>${escapeHtml(a.approverName)}</td>
               <td>${escapeHtml(a.status)}</td>
               <td>${escapeHtml(a.timestamp)}</td>

@@ -14,7 +14,14 @@ import { PoLineTypeahead, type PoSearchLine } from '../../components/PoLineTypea
 import { PrPoLineMetricsCells, type PoLineSummary } from '../../components/PrPoLineMetricsCells';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
-import { ApiError, authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../lib/api';
+import {
+  ApiError,
+  authedFetchWithSupabase,
+  formatPkr,
+  getAccessTokenFromSupabaseSession,
+  NoSessionError,
+  readPdfDownloadErrorMessage,
+} from '../../lib/api';
 import { sortApprovalStageIndex } from '../../lib/org';
 import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
 
@@ -399,16 +406,15 @@ export default function PurchaseRequestsPage() {
         headers: { Authorization: `Bearer ${bearer}` },
       });
       if (!res.ok) {
-        let msg = 'Failed to download PDF';
-        try {
-          const body = (await res.json()) as { message?: string };
-          if (body?.message) msg = body.message;
-        } catch {
-          // ignore parse errors
-        }
+        const msg = await readPdfDownloadErrorMessage(res, 'Failed to download PDF');
         throw new Error(msg);
       }
       const blob = await res.blob();
+      if (!blob.type.includes('pdf')) {
+        const snippet = (await blob.text()).slice(0, 300);
+        console.error('PDF ERROR: response is not PDF', blob.type, snippet);
+        throw new Error('Server did not return a PDF file');
+      }
       const url = window.URL.createObjectURL(blob);
       const a = window.document.createElement('a');
       a.href = url;
@@ -419,7 +425,11 @@ export default function PurchaseRequestsPage() {
       window.URL.revokeObjectURL(url);
     },
     onMutate: () => setDownloadError(null),
-    onError: (e: unknown) => setDownloadError(e instanceof Error ? e.message : 'Failed to download PDF'),
+    onError: (e: unknown) => {
+      const msg = e instanceof Error ? e.message : 'Failed to download PDF';
+      setDownloadError(msg);
+      alert(msg);
+    },
   });
 
   return (

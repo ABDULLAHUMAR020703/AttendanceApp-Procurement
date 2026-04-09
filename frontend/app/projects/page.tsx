@@ -12,7 +12,13 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
-import { ApiError, authedFetchWithSupabase, getAccessTokenFromSupabaseSession, NoSessionError } from '../../lib/api';
+import {
+  ApiError,
+  authedFetchWithSupabase,
+  getAccessTokenFromSupabaseSession,
+  NoSessionError,
+  readPdfDownloadErrorMessage,
+} from '../../lib/api';
 import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
 
 type PurchaseOrderGroup = {
@@ -348,16 +354,15 @@ export default function ProjectsPage() {
         headers: { Authorization: `Bearer ${bearer}` },
       });
       if (!res.ok) {
-        let msg = 'Failed to download project PDF';
-        try {
-          const body = (await res.json()) as { message?: string };
-          if (body?.message) msg = body.message;
-        } catch {
-          // ignore
-        }
+        const msg = await readPdfDownloadErrorMessage(res, 'Failed to download project PDF');
         throw new Error(msg);
       }
       const blob = await res.blob();
+      if (!blob.type.includes('pdf')) {
+        const snippet = (await blob.text()).slice(0, 300);
+        console.error('PDF ERROR: response is not PDF', blob.type, snippet);
+        throw new Error('Server did not return a PDF file');
+      }
       const url = window.URL.createObjectURL(blob);
       const a = window.document.createElement('a');
       a.href = url;
@@ -368,7 +373,11 @@ export default function ProjectsPage() {
       window.URL.revokeObjectURL(url);
     },
     onMutate: () => setDownloadError(null),
-    onError: (e: unknown) => setDownloadError(e instanceof Error ? e.message : 'Failed to download project PDF'),
+    onError: (e: unknown) => {
+      const msg = e instanceof Error ? e.message : 'Failed to download project PDF';
+      setDownloadError(msg);
+      alert(msg);
+    },
   });
 
   const teamLeadMutation = useMutation({
