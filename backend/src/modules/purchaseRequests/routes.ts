@@ -188,47 +188,87 @@ purchaseRequestsRouter.get(
   '/:id/pdf',
   requireRole('admin', 'pm'),
   async (req, res, next) => {
-    try {
-      const requestId = req.params.id as string;
-      if (!requestId) throw new AppError('Missing purchase request id', 400);
+    const rawId = req.params.id as string;
+    const role = req.auth!.role;
+    const userId = req.auth!.userId;
 
-      const { data: prScope } = await supabaseAdmin
+    try {
+      const parsedId = z.string().uuid().safeParse(rawId);
+      if (!parsedId.success) {
+        console.error('PDF GENERATION ERROR (PR): invalid id', { id: rawId, userId, role });
+        return res.status(400).json({ message: 'Invalid purchase request id' });
+      }
+      const requestId = parsedId.data;
+
+      const { data: prScope, error: prScopeErr } = await supabaseAdmin
         .from('purchase_requests')
         .select('id, project_id')
         .eq('id', requestId)
         .maybeSingle();
-      if (!prScope) throw new AppError('Purchase request not found', 404);
-      const { data: projectScope } = prScope?.project_id
+
+      if (prScopeErr) {
+        console.error('PDF GENERATION ERROR (PR): DB fetch PR', prScopeErr, { requestId, userId, role });
+        return res.status(500).json({ message: 'Failed to load purchase request' });
+      }
+      if (!prScope) {
+        console.error('PDF GENERATION ERROR (PR): not found', { requestId, userId, role });
+        return res.status(404).json({ message: 'PR not found' });
+      }
+
+      const { data: projectScope } = prScope.project_id
         ? await supabaseAdmin.from('projects').select('department_id').eq('id', prScope.project_id).maybeSingle()
         : { data: null as { department_id?: string | null } | null };
       const scopeDept = (projectScope?.department_id as string | null) ?? null;
 
-      if (req.auth!.role === 'pm') {
+      console.info('[pdf] PR: pre checks', {
+        requestId,
+        userId,
+        role,
+        projectId: prScope.project_id,
+        hasDepartmentScope: Boolean(scopeDept),
+      });
+
+      if (role === 'pm') {
         const actorDept = req.auth!.department ?? null;
         if (!scopeDept || !actorDept || actorDept !== scopeDept) {
-          throw new AppError('You can only download PDFs for purchase requests in your department', 403);
+          console.error('PDF GENERATION ERROR (PR): forbidden dept', { requestId, userId, role, scopeDept, actorDept });
+          return res.status(403).json({ message: 'You can only download PDFs for purchase requests in your department' });
         }
       }
 
-      const pdfBuffer = await buildPurchaseRequestPdf({ requestId });
+      let pdfBuffer: Buffer;
+      try {
+        pdfBuffer = await buildPurchaseRequestPdf({ requestId });
+      } catch (genErr) {
+        console.error('PDF GENERATION ERROR:', genErr, { requestId, userId, role, kind: 'pr-build' });
+        throw genErr;
+      }
 
-      await recordTrackedAction({
-        audit: {
-          action: 'purchase_request_pdf_downloaded',
-          userId: req.auth!.userId,
-          entity: 'purchase_request',
-          entityType: 'purchase_request',
-          entityId: requestId,
-          departmentScope: scopeDept,
-        },
-        touch: { table: 'purchase_requests', id: requestId },
-      });
+      console.info('[pdf] PR: buffer ready', { requestId, byteLength: pdfBuffer?.length ?? 0 });
+
+      try {
+        await recordTrackedAction({
+          audit: {
+            action: 'purchase_request_pdf_downloaded',
+            userId,
+            entity: 'purchase_request',
+            entityType: 'purchase_request',
+            entityId: requestId,
+            departmentScope: scopeDept,
+          },
+          touch: { table: 'purchase_requests', id: requestId },
+        });
+      } catch (auditErr) {
+        console.error('PDF audit log failed (PR); PDF still sent', auditErr, { requestId, userId, role });
+      }
 
       const safeId = requestId.replace(/[^a-zA-Z0-9_-]/g, '');
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename=\"PR_${safeId}.pdf\"`);
-      return res.status(200).send(pdfBuffer);
+      res.status(200);
+      return res.end(pdfBuffer);
     } catch (err) {
+      console.error('PDF GENERATION ERROR:', err, { id: rawId, userId, role, kind: 'pr-route' });
       next(err);
     }
   },

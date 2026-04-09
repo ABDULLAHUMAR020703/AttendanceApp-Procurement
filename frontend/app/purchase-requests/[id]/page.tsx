@@ -9,7 +9,13 @@ import { Card } from '../../../components/ui/Card';
 import { PageContainer } from '../../../components/ui/PageContainer';
 import { PageHeader } from '../../../components/ui/PageHeader';
 import { useAuth } from '../../../features/auth/AuthProvider';
-import { authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../../lib/api';
+import {
+  authedFetchWithSupabase,
+  formatPkr,
+  getAccessTokenFromSupabaseSession,
+  NoSessionError,
+  readPdfDownloadErrorMessage,
+} from '../../../lib/api';
 import { useState } from 'react';
 import { AuditHistoryModal } from '../../../components/AuditHistoryModal';
 import { LastUpdatedMeta, LastUpdatedPanel } from '../../../components/LastUpdatedPanel';
@@ -148,27 +154,30 @@ export default function PurchaseRequestDetailsPage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) {
-        let msg = 'Failed to download PDF';
-        try {
-          const body = (await res.json()) as { message?: string };
-          if (body?.message) msg = body.message;
-        } catch {
-          // ignore parse errors
-        }
+        const msg = await readPdfDownloadErrorMessage(res, 'Failed to download PDF');
         throw new Error(msg);
       }
       const blob = await res.blob();
+      if (!blob.type.includes('pdf')) {
+        const snippet = (await blob.text()).slice(0, 300);
+        console.error('PDF ERROR: response is not PDF', blob.type, snippet);
+        throw new Error('Server did not return a PDF file');
+      }
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = window.document.createElement('a');
       a.href = url;
       a.download = `PR_${requestId}.pdf`;
-      document.body.appendChild(a);
+      window.document.body.appendChild(a);
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
     },
     onMutate: () => setDownloadError(null),
-    onError: (e: unknown) => setDownloadError(e instanceof Error ? e.message : 'Failed to download PDF'),
+    onError: (e: unknown) => {
+      const msg = e instanceof Error ? e.message : 'Failed to download PDF';
+      setDownloadError(msg);
+      alert(msg);
+    },
   });
 
   if (!isAdmin) {
