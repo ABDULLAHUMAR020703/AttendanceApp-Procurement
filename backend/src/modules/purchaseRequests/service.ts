@@ -12,7 +12,7 @@ import {
   type PoAnchor,
 } from './poLineContext';
 import { assertActorMaySubmitPurchaseRequestForProject } from '../projects/projectAccess';
-import { generatePurchaseRequestPdf } from './pdf';
+import { generatePRPdf } from '../../utils/pdfGenerator';
 
 export { normalizeItemCode } from '../../utils/itemCode';
 
@@ -367,35 +367,34 @@ export async function buildPurchaseRequestPdf(params: { requestId: string }): Pr
     .map((a) => (a.comments as string | null)?.trim())
     .filter((v): v is string => Boolean(v));
 
-  return await generatePurchaseRequestPdf({
-    prId: String(pr.id),
-    companyName: 'Company Name',
+  return await generatePRPdf({
+    id: String(pr.id),
     requestedBy:
       String((requesterRes.data as { name?: string | null; email?: string | null } | null)?.name ?? '') ||
       String((requesterRes.data as { email?: string | null } | null)?.email ?? 'Unknown'),
     department: String((requesterRes.data as { department?: string | null } | null)?.department ?? project?.department_id ?? '—'),
-    dateCreated: new Date(String(pr.created_at)).toLocaleString(),
+    createdAt: new Date(String(pr.created_at)).toLocaleString(),
     status: String(pr.status),
     projectName: String(project?.name ?? '—'),
-    notes: comments.length > 0 ? comments.join(' | ') : null,
-    item: {
-      name: String((poLineRes.data as { item_code?: string | null } | null)?.item_code ?? (pr.item_code as string | null) ?? 'Requested item'),
-      description: String((poLineRes.data as { description?: string | null } | null)?.description ?? pr.description),
-      quantity: safeQty.toString(),
-      unitPrice: formatCurrency(unitPrice),
-      total: formatCurrency(Number(pr.amount)),
-    },
-    financialSummary: {
-      totalAmount: formatCurrency(Number(pr.amount)),
-      budgetOrPoReference: poRef,
-    },
+    notes: comments.length > 0 ? comments.join(' | ') : '—',
+    itemName: String(
+      (poLineRes.data as { item_code?: string | null } | null)?.item_code ??
+        (pr.item_code as string | null) ??
+        'Requested item',
+    ),
+    itemDescription: String((poLineRes.data as { description?: string | null } | null)?.description ?? pr.description),
+    quantity: safeQty.toString(),
+    unitPrice: formatCurrency(unitPrice),
+    total: formatCurrency(Number(pr.amount)),
+    totalAmount: formatCurrency(Number(pr.amount)),
+    budgetOrPoReference: poRef,
     approvals: approvals.map((a) => {
       const user = approverMap.get(a.approver_id as string);
       return {
         role: String(a.role),
         approverName: user?.name || user?.email || String(a.approver_id),
         status: String(a.status),
-        timestamp: a.updated_at ? new Date(String(a.updated_at)).toLocaleString() : null,
+        timestamp: a.updated_at ? new Date(String(a.updated_at)).toLocaleString() : '—',
       };
     }),
   });

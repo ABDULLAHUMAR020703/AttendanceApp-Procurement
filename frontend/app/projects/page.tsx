@@ -12,7 +12,7 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
-import { ApiError, authedFetchWithSupabase, NoSessionError } from '../../lib/api';
+import { ApiError, authedFetchWithSupabase, getAccessTokenFromSupabaseSession, NoSessionError } from '../../lib/api';
 import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
 
 type PurchaseOrderGroup = {
@@ -223,6 +223,7 @@ export default function ProjectsPage() {
   });
 
   const canCreate = profile?.role === 'admin' || isDeptManagerRole(profile?.role);
+  const canDownloadPdf = profile?.role === 'admin' || profile?.role === 'pm';
 
   const [name, setName] = useState('');
   const [poId, setPoId] = useState<string>('');
@@ -235,6 +236,7 @@ export default function ProjectsPage() {
   const [error, setError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const allDepartmentsForSelect = departmentsData?.departments ?? [];
 
@@ -334,6 +336,39 @@ export default function ProjectsPage() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     },
     onError: (err: unknown) => setError(err instanceof Error ? err.message : 'Create failed'),
+  });
+
+  const downloadProjectPdfMutation = useMutation({
+    mutationFn: async (projectId: string) => {
+      if (!supabase) throw new Error('Not signed in');
+      const bearer = await getAccessTokenFromSupabaseSession(supabase);
+      const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
+      const res = await fetch(`${apiBase}/api/projects/${projectId}/pdf`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${bearer}` },
+      });
+      if (!res.ok) {
+        let msg = 'Failed to download project PDF';
+        try {
+          const body = (await res.json()) as { message?: string };
+          if (body?.message) msg = body.message;
+        } catch {
+          // ignore
+        }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `PROJECT_${projectId}.pdf`;
+      window.document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    },
+    onMutate: () => setDownloadError(null),
+    onError: (e: unknown) => setDownloadError(e instanceof Error ? e.message : 'Failed to download project PDF'),
   });
 
   const teamLeadMutation = useMutation({
@@ -606,6 +641,7 @@ export default function ProjectsPage() {
               )}
 
               {error ? <div className="md:col-span-2 text-sm text-rose-300">{error}</div> : null}
+              {downloadError ? <div className="md:col-span-2 text-sm text-rose-300">{downloadError}</div> : null}
 
               <Button className="md:col-span-2" disabled={mutation.isPending} type="submit">
                 {mutation.isPending ? 'Creating...' : 'Create Project'}
@@ -633,7 +669,7 @@ export default function ProjectsPage() {
                     <TH className="min-w-[140px]">Last updated</TH>
                     <TH>Budget & usage</TH>
                     <TH>PO</TH>
-                    <TH className="w-[120px]">Actions</TH>
+                    <TH className="w-[160px]">Actions</TH>
                   </TR>
                 </THead>
                 <TBody>
@@ -718,21 +754,34 @@ export default function ProjectsPage() {
                         </TD>
                         <TD className="max-w-[240px] truncate text-sm">{p.po_id ? p.po_id : 'No PO'}</TD>
                         <TD>
-                          {canArchiveProject(p, profile) ? (
-                            <Button
-                              type="button"
-                              variant="danger"
-                              className="px-2 py-1 text-xs"
-                              onClick={() => {
-                                setArchiveError(null);
-                                setArchiveTarget({ id: p.id, name: p.name });
-                              }}
-                            >
-                              Delete
-                            </Button>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">—</span>
-                          )}
+                          <div className="flex flex-col gap-1">
+                            {canDownloadPdf ? (
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                className="px-2 py-1 text-xs"
+                                disabled={downloadProjectPdfMutation.isPending}
+                                onClick={() => downloadProjectPdfMutation.mutate(p.id)}
+                              >
+                                {downloadProjectPdfMutation.isPending ? 'Generating PDF...' : 'Download PDF'}
+                              </Button>
+                            ) : null}
+                            {canArchiveProject(p, profile) ? (
+                              <Button
+                                type="button"
+                                variant="danger"
+                                className="px-2 py-1 text-xs"
+                                onClick={() => {
+                                  setArchiveError(null);
+                                  setArchiveTarget({ id: p.id, name: p.name });
+                                }}
+                              >
+                                Delete
+                              </Button>
+                            ) : !canDownloadPdf ? (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            ) : null}
+                          </div>
                         </TD>
                       </TR>
                     );

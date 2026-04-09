@@ -13,7 +13,7 @@ import { Input } from '../../../components/ui/Input';
 import { PageContainer } from '../../../components/ui/PageContainer';
 import { PageHeader } from '../../../components/ui/PageHeader';
 import { useAuth } from '../../../features/auth/AuthProvider';
-import { authedFetchWithSupabase, formatPkr, NoSessionError } from '../../../lib/api';
+import { authedFetchWithSupabase, formatPkr, getAccessTokenFromSupabaseSession, NoSessionError } from '../../../lib/api';
 
 type UserLite = {
   id: string;
@@ -77,6 +77,7 @@ export default function ProjectDetailPage() {
   const [projectHistoryOpen, setProjectHistoryOpen] = useState(false);
   const [employeeSearch, setEmployeeSearch] = useState('');
   const [editMembers, setEditMembers] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const canManageMembers =
     profile?.role === 'admin' || profile?.role === 'pm' || profile?.role === 'dept_head';
@@ -143,6 +144,40 @@ export default function ProjectDetailPage() {
     },
   });
 
+  const canDownloadPdf = profile?.role === 'admin' || profile?.role === 'pm';
+  const downloadProjectPdfMutation = useMutation({
+    mutationFn: async () => {
+      if (!supabase) throw new Error('Not signed in');
+      const bearer = await getAccessTokenFromSupabaseSession(supabase);
+      const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
+      const res = await fetch(`${apiBase}/api/projects/${projectId}/pdf`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${bearer}` },
+      });
+      if (!res.ok) {
+        let msg = 'Failed to download project PDF';
+        try {
+          const body = (await res.json()) as { message?: string };
+          if (body?.message) msg = body.message;
+        } catch {
+          // ignore
+        }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `PROJECT_${projectId}.pdf`;
+      window.document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    },
+    onMutate: () => setDownloadError(null),
+    onError: (e: unknown) => setDownloadError(e instanceof Error ? e.message : 'Failed to download project PDF'),
+  });
+
   const startEditMembers = () => {
     setSelectedMembers(new Set((p?.assigned_employees ?? []).map((u) => u.id)));
     setEmployeeSearch('');
@@ -183,7 +218,18 @@ export default function ProjectDetailPage() {
               Back to projects
             </Button>
           </Link>
+          {canDownloadPdf ? (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => downloadProjectPdfMutation.mutate()}
+              disabled={downloadProjectPdfMutation.isPending}
+            >
+              {downloadProjectPdfMutation.isPending ? 'Generating PDF...' : 'Download PDF'}
+            </Button>
+          ) : null}
         </div>
+        {downloadError ? <Card className="p-3 text-sm text-rose-300">{downloadError}</Card> : null}
 
         {isLoading ? <Card className="p-4 text-sm text-muted-foreground">Loading…</Card> : null}
         {error ? (

@@ -192,16 +192,25 @@ purchaseRequestsRouter.get(
       const requestId = req.params.id as string;
       if (!requestId) throw new AppError('Missing purchase request id', 400);
 
-      const pdfBuffer = await buildPurchaseRequestPdf({ requestId });
-
       const { data: prScope } = await supabaseAdmin
         .from('purchase_requests')
         .select('id, project_id')
         .eq('id', requestId)
         .maybeSingle();
+      if (!prScope) throw new AppError('Purchase request not found', 404);
       const { data: projectScope } = prScope?.project_id
         ? await supabaseAdmin.from('projects').select('department_id').eq('id', prScope.project_id).maybeSingle()
         : { data: null as { department_id?: string | null } | null };
+      const scopeDept = (projectScope?.department_id as string | null) ?? null;
+
+      if (req.auth!.role === 'pm') {
+        const actorDept = req.auth!.department ?? null;
+        if (!scopeDept || !actorDept || actorDept !== scopeDept) {
+          throw new AppError('You can only download PDFs for purchase requests in your department', 403);
+        }
+      }
+
+      const pdfBuffer = await buildPurchaseRequestPdf({ requestId });
 
       await recordTrackedAction({
         audit: {
@@ -210,7 +219,7 @@ purchaseRequestsRouter.get(
           entity: 'purchase_request',
           entityType: 'purchase_request',
           entityId: requestId,
-          departmentScope: (projectScope?.department_id as string | null) ?? null,
+          departmentScope: scopeDept,
         },
         touch: { table: 'purchase_requests', id: requestId },
       });

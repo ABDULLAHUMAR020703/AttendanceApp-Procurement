@@ -6,6 +6,7 @@ import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import {
   archiveProject,
+  buildProjectPdf,
   createProjectWithExceptionFlow,
   updateProjectMemberAssignments,
   updateProjectTeamLead,
@@ -14,6 +15,7 @@ import { assertActorMayViewProject, fetchProjectForAccess, loadEmployeeVisiblePr
 import { budgetPairFromRow, type PurchaseOrderDbRow } from '../po/groupByPo';
 import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
 import { bypassesDepartmentScope, isDeptManagerRole } from '../auth/types';
+import { recordTrackedAction } from '../auditLogs/trackedAction';
 
 export const projectsRouter = Router();
 
@@ -185,6 +187,39 @@ projectsRouter.get('/', requireRole('admin', 'pm', 'dept_head', 'employee'), asy
     });
 
     res.json({ projects: enriched });
+  } catch (err) {
+    next(err);
+  }
+});
+
+projectsRouter.get('/:id/pdf', requireRole('admin', 'pm'), async (req, res, next) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const project = await fetchProjectForAccess(id);
+    await assertActorMayViewProject({
+      project,
+      actorUserId: req.auth!.userId,
+      actorRole: req.auth!.role,
+      actorDepartment: req.auth!.department ?? null,
+    });
+
+    const pdfBuffer = await buildProjectPdf({ projectId: id });
+
+    await recordTrackedAction({
+      audit: {
+        action: 'project_pdf_downloaded',
+        userId: req.auth!.userId,
+        entity: 'project',
+        entityType: 'project',
+        entityId: id,
+        departmentScope: project.department_id,
+      },
+      touch: { table: 'projects', id },
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=\"PROJECT_${id}.pdf\"`);
+    return res.status(200).send(pdfBuffer);
   } catch (err) {
     next(err);
   }
