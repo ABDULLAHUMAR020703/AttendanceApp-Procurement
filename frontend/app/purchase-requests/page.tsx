@@ -20,7 +20,6 @@ import {
   formatPkr,
   getAccessTokenFromSupabaseSession,
   NoSessionError,
-  readPdfDownloadErrorMessage,
 } from '../../lib/api';
 import { sortApprovalStageIndex } from '../../lib/org';
 import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
@@ -123,7 +122,6 @@ export default function PurchaseRequestsPage() {
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const isAdmin = profile?.role === 'admin';
   const canDownloadPdf = profile?.role === 'admin' || profile?.role === 'pm';
-  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const { data: projectsData } = useQuery({
     queryKey: ['projects', 'for-pr'],
@@ -396,42 +394,6 @@ export default function PurchaseRequestsPage() {
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Force approve failed'),
   });
 
-  const downloadPdfMutation = useMutation({
-    mutationFn: async (requestId: string) => {
-      if (!supabase) throw new Error('Not signed in');
-      const bearer = await getAccessTokenFromSupabaseSession(supabase);
-      const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
-      const res = await fetch(`${apiBase}/api/purchase-requests/${requestId}/pdf`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${bearer}` },
-      });
-      if (!res.ok) {
-        const msg = await readPdfDownloadErrorMessage(res, 'Failed to download PDF');
-        throw new Error(msg);
-      }
-      const blob = await res.blob();
-      if (!blob.type.includes('pdf')) {
-        const snippet = (await blob.text()).slice(0, 300);
-        console.error('PDF ERROR: response is not PDF', blob.type, snippet);
-        throw new Error('Server did not return a PDF file');
-      }
-      const url = window.URL.createObjectURL(blob);
-      const a = window.document.createElement('a');
-      a.href = url;
-      a.download = `PR_${requestId}.pdf`;
-      window.document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-    },
-    onMutate: () => setDownloadError(null),
-    onError: (e: unknown) => {
-      const msg = e instanceof Error ? e.message : 'Failed to download PDF';
-      setDownloadError(msg);
-      alert(msg);
-    },
-  });
-
   return (
     <AppLayout>
       <PageContainer className="space-y-6">
@@ -655,7 +617,6 @@ export default function PurchaseRequestsPage() {
             </div>
 
           {error ? <div className="md:col-span-2 text-sm text-rose-300">{error}</div> : null}
-          {downloadError ? <div className="md:col-span-2 text-sm text-rose-300">{downloadError}</div> : null}
 
             <Button
               className="md:col-span-2"
@@ -723,10 +684,9 @@ export default function PurchaseRequestsPage() {
                               type="button"
                               variant="secondary"
                               className="text-xs px-2 py-1"
-                              disabled={downloadPdfMutation.isPending}
-                              onClick={() => downloadPdfMutation.mutate(pr.id)}
+                              onClick={() => window.open(`/print/pr/${pr.id}`, '_blank')}
                             >
-                              {downloadPdfMutation.isPending ? 'Generating PDF...' : 'Download PDF'}
+                              Download PDF
                             </Button>
                             {isAdmin ? (
                               <>

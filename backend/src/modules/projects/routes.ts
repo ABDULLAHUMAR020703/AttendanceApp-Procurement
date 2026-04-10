@@ -6,7 +6,6 @@ import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import {
   archiveProject,
-  buildProjectPdf,
   createProjectWithExceptionFlow,
   updateProjectMemberAssignments,
   updateProjectTeamLead,
@@ -15,12 +14,10 @@ import {
   assertActorMayViewProject,
   fetchProjectForAccess,
   loadEmployeeVisibleProjectIds,
-  type ProjectAccessRow,
 } from './projectAccess';
 import { budgetPairFromRow, type PurchaseOrderDbRow } from '../po/groupByPo';
 import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
 import { bypassesDepartmentScope, isDeptManagerRole } from '../auth/types';
-import { recordTrackedAction } from '../auditLogs/trackedAction';
 
 export const projectsRouter = Router();
 
@@ -197,94 +194,6 @@ projectsRouter.get('/', requireRole('admin', 'pm', 'dept_head', 'employee'), asy
   }
 });
 
-projectsRouter.get('/:id/pdf', requireRole('admin', 'pm'), async (req, res, next) => {
-  const rawId = req.params.id as string;
-  const role = req.auth!.role;
-  const userId = req.auth!.userId;
-
-  try {
-    const parsedId = z.string().uuid().safeParse(rawId);
-    if (!parsedId.success) {
-      console.error('PDF GENERATION ERROR (project): invalid id', { id: rawId, userId, role });
-      return res.status(400).json({ message: 'Invalid project id' });
-    }
-    const id = parsedId.data;
-
-    const { data: projRow, error: projFetchErr } = await supabaseAdmin
-      .from('projects')
-      .select('id, department_id, team_lead_id, pm_id, created_by, status')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (projFetchErr) {
-      console.error('PDF GENERATION ERROR (project): DB fetch', projFetchErr, { id, userId, role });
-      return res.status(500).json({ message: 'Failed to load project' });
-    }
-    if (!projRow) {
-      console.error('PDF GENERATION ERROR (project): not found', { id, userId, role });
-      return res.status(404).json({ message: 'Project not found' });
-    }
-
-    // Do not use fetchProjectForAccess here — null pm_id would throw 500; PDF must still work for legacy rows.
-    const projectForAccess: ProjectAccessRow = {
-      id: projRow.id as string,
-      department_id: projRow.department_id as string,
-      team_lead_id: (projRow.team_lead_id as string | null) ?? null,
-      pm_id: (projRow.pm_id as string | null) ?? '',
-      created_by: projRow.created_by as string,
-      status: projRow.status as string,
-    };
-
-    await assertActorMayViewProject({
-      project: projectForAccess,
-      actorUserId: userId,
-      actorRole: role,
-      actorDepartment: req.auth!.department ?? null,
-    });
-
-    console.info('[pdf] project: generating', { id, userId, role, departmentId: projectForAccess.department_id });
-
-    let pdfBuffer: Buffer;
-    try {
-      pdfBuffer = await buildProjectPdf({ projectId: id });
-    } catch (genErr) {
-      console.error('PDF GENERATION ERROR:', genErr, { id, userId, role, kind: 'project-build' });
-      throw genErr;
-    }
-
-    console.info('[pdf] project: buffer ready', { id, byteLength: pdfBuffer?.length ?? 0 });
-
-    try {
-      await recordTrackedAction({
-        audit: {
-          action: 'project_pdf_downloaded',
-          userId,
-          entity: 'project',
-          entityType: 'project',
-          entityId: id,
-          departmentScope: projectForAccess.department_id,
-        },
-        touch: { table: 'projects', id },
-      });
-    } catch (auditErr) {
-      console.error('PDF audit log failed (project); PDF still sent', auditErr, { id, userId, role });
-    }
-
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=\"PROJECT_${id}.pdf\"`);
-    res.status(200);
-    return res.end(pdfBuffer);
-  } catch (err) {
-    console.error('PDF ERROR:', err);
-    if (res.headersSent) return;
-    if (err instanceof AppError) {
-      return res.status(err.statusCode).json({ message: err.message });
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    return res.status(500).json({ message });
-  }
-});
-
 projectsRouter.get('/:id', requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
@@ -380,6 +289,25 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'dept_head', 'employee'), 
       job_title: string | null;
     }>;
 
+    const includeRelatedPrs = req.query.include === 'related_prs';
+    let relatedPurchaseRequests: Array<{
+      id: string;
+      description: string;
+      amount: number;
+      status: string;
+      created_at: string;
+    }> = [];
+    if (includeRelatedPrs) {
+      const { data: prRows, error: prErr } = await supabaseAdmin
+        .from('purchase_requests')
+        .select('id, description, amount, status, created_at')
+        .eq('project_id', id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (prErr) throw prErr;
+      relatedPurchaseRequests = (prRows ?? []) as typeof relatedPurchaseRequests;
+    }
+
     res.json({
       project: {
         ...project,
@@ -392,6 +320,7 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'dept_head', 'employee'), 
         assigned_employees: assignedEmployees,
       },
       purchaseOrder,
+      ...(includeRelatedPrs ? { relatedPurchaseRequests } : {}),
     });
   } catch (err) {
     next(err);

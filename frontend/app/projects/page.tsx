@@ -12,13 +12,7 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../components/ui/Table';
 import { useAuth } from '../../features/auth/AuthProvider';
-import {
-  ApiError,
-  authedFetchWithSupabase,
-  getAccessTokenFromSupabaseSession,
-  NoSessionError,
-  readPdfDownloadErrorMessage,
-} from '../../lib/api';
+import { ApiError, authedFetchWithSupabase, NoSessionError } from '../../lib/api';
 import { LastUpdatedMeta } from '../../components/LastUpdatedPanel';
 
 type PurchaseOrderGroup = {
@@ -242,7 +236,6 @@ export default function ProjectsPage() {
   const [error, setError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const allDepartmentsForSelect = departmentsData?.departments ?? [];
 
@@ -342,42 +335,6 @@ export default function ProjectsPage() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     },
     onError: (err: unknown) => setError(err instanceof Error ? err.message : 'Create failed'),
-  });
-
-  const downloadProjectPdfMutation = useMutation({
-    mutationFn: async (projectId: string) => {
-      if (!supabase) throw new Error('Not signed in');
-      const bearer = await getAccessTokenFromSupabaseSession(supabase);
-      const apiBase = process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? 'http://localhost:4000';
-      const res = await fetch(`${apiBase}/api/projects/${projectId}/pdf`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${bearer}` },
-      });
-      if (!res.ok) {
-        const msg = await readPdfDownloadErrorMessage(res, 'Failed to download project PDF');
-        throw new Error(msg);
-      }
-      const blob = await res.blob();
-      if (!blob.type.includes('pdf')) {
-        const snippet = (await blob.text()).slice(0, 300);
-        console.error('PDF ERROR: response is not PDF', blob.type, snippet);
-        throw new Error('Server did not return a PDF file');
-      }
-      const url = window.URL.createObjectURL(blob);
-      const a = window.document.createElement('a');
-      a.href = url;
-      a.download = `PROJECT_${projectId}.pdf`;
-      window.document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-    },
-    onMutate: () => setDownloadError(null),
-    onError: (e: unknown) => {
-      const msg = e instanceof Error ? e.message : 'Failed to download project PDF';
-      setDownloadError(msg);
-      alert(msg);
-    },
   });
 
   const teamLeadMutation = useMutation({
@@ -650,7 +607,6 @@ export default function ProjectsPage() {
               )}
 
               {error ? <div className="md:col-span-2 text-sm text-rose-300">{error}</div> : null}
-              {downloadError ? <div className="md:col-span-2 text-sm text-rose-300">{downloadError}</div> : null}
 
               <Button className="md:col-span-2" disabled={mutation.isPending} type="submit">
                 {mutation.isPending ? 'Creating...' : 'Create Project'}
@@ -769,10 +725,9 @@ export default function ProjectsPage() {
                                 type="button"
                                 variant="secondary"
                                 className="px-2 py-1 text-xs"
-                                disabled={downloadProjectPdfMutation.isPending}
-                                onClick={() => downloadProjectPdfMutation.mutate(p.id)}
+                                onClick={() => window.open(`/print/project/${p.id}`, '_blank')}
                               >
-                                {downloadProjectPdfMutation.isPending ? 'Generating PDF...' : 'Download PDF'}
+                                Download PDF
                               </Button>
                             ) : null}
                             {canArchiveProject(p, profile) ? (

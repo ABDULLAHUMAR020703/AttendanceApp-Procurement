@@ -3,7 +3,7 @@ import multer from 'multer';
 import { requireAuth } from '../../middleware/auth';
 import { requireRole } from '../../middleware/rbac';
 import { z } from 'zod';
-import { buildPurchaseRequestPdf, countPreviousPrsForSameItem, createPurchaseRequest, normalizeItemCode } from './service';
+import { countPreviousPrsForSameItem, createPurchaseRequest, normalizeItemCode } from './service';
 import {
   buildPrPoLineSummary,
   enrichPurchaseRequestsWithPoLine,
@@ -14,7 +14,6 @@ import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { bypassesDepartmentScope } from '../auth/types';
 import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
-import { recordTrackedAction } from '../auditLogs/trackedAction';
 
 export const purchaseRequestsRouter = Router();
 
@@ -185,103 +184,8 @@ purchaseRequestsRouter.get(
 );
 
 purchaseRequestsRouter.get(
-  '/:id/pdf',
-  requireRole('admin', 'pm'),
-  async (req, res, next) => {
-    const rawId = req.params.id as string;
-    const role = req.auth!.role;
-    const userId = req.auth!.userId;
-
-    try {
-      const parsedId = z.string().uuid().safeParse(rawId);
-      if (!parsedId.success) {
-        console.error('PDF GENERATION ERROR (PR): invalid id', { id: rawId, userId, role });
-        return res.status(400).json({ message: 'Invalid purchase request id' });
-      }
-      const requestId = parsedId.data;
-
-      const { data: prScope, error: prScopeErr } = await supabaseAdmin
-        .from('purchase_requests')
-        .select('id, project_id')
-        .eq('id', requestId)
-        .maybeSingle();
-
-      if (prScopeErr) {
-        console.error('PDF GENERATION ERROR (PR): DB fetch PR', prScopeErr, { requestId, userId, role });
-        return res.status(500).json({ message: 'Failed to load purchase request' });
-      }
-      if (!prScope) {
-        console.error('PDF GENERATION ERROR (PR): not found', { requestId, userId, role });
-        return res.status(404).json({ message: 'PR not found' });
-      }
-
-      const { data: projectScope } = prScope.project_id
-        ? await supabaseAdmin.from('projects').select('department_id').eq('id', prScope.project_id).maybeSingle()
-        : { data: null as { department_id?: string | null } | null };
-      const scopeDept = (projectScope?.department_id as string | null) ?? null;
-
-      console.info('[pdf] PR: pre checks', {
-        requestId,
-        userId,
-        role,
-        projectId: prScope.project_id,
-        hasDepartmentScope: Boolean(scopeDept),
-      });
-
-      if (role === 'pm') {
-        const actorDept = req.auth!.department ?? null;
-        if (!scopeDept || !actorDept || actorDept !== scopeDept) {
-          console.error('PDF GENERATION ERROR (PR): forbidden dept', { requestId, userId, role, scopeDept, actorDept });
-          return res.status(403).json({ message: 'You can only download PDFs for purchase requests in your department' });
-        }
-      }
-
-      let pdfBuffer: Buffer;
-      try {
-        pdfBuffer = await buildPurchaseRequestPdf({ requestId });
-      } catch (genErr) {
-        console.error('PDF GENERATION ERROR:', genErr, { requestId, userId, role, kind: 'pr-build' });
-        throw genErr;
-      }
-
-      console.info('[pdf] PR: buffer ready', { requestId, byteLength: pdfBuffer?.length ?? 0 });
-
-      try {
-        await recordTrackedAction({
-          audit: {
-            action: 'purchase_request_pdf_downloaded',
-            userId,
-            entity: 'purchase_request',
-            entityType: 'purchase_request',
-            entityId: requestId,
-            departmentScope: scopeDept,
-          },
-          touch: { table: 'purchase_requests', id: requestId },
-        });
-      } catch (auditErr) {
-        console.error('PDF audit log failed (PR); PDF still sent', auditErr, { requestId, userId, role });
-      }
-
-      const safeId = requestId.replace(/[^a-zA-Z0-9_-]/g, '');
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=\"PR_${safeId}.pdf\"`);
-      res.status(200);
-      return res.end(pdfBuffer);
-    } catch (err) {
-      console.error('PDF ERROR:', err);
-      if (res.headersSent) return;
-      if (err instanceof AppError) {
-        return res.status(err.statusCode).json({ message: err.message });
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      return res.status(500).json({ message });
-    }
-  },
-);
-
-purchaseRequestsRouter.get(
   '/:id',
-  requireRole('admin'),
+  requireRole('admin', 'pm'),
   async (req, res, next) => {
     try {
       const requestId = req.params.id as string;
@@ -330,6 +234,15 @@ purchaseRequestsRouter.get(
       const approvals = approvalsRes.data ?? [];
 
       if (approvalsRes.error) throw approvalsRes.error;
+
+      const actorRole = req.auth!.role;
+      if (actorRole === 'pm') {
+        const actorDept = req.auth!.department ?? null;
+        const projectDept = (project?.department_id as string | null) ?? null;
+        if (!projectDept || !actorDept || actorDept !== projectDept) {
+          throw new AppError('You can only view purchase requests for projects in your department', 403);
+        }
+      }
 
       const poId = project?.po_id ?? null;
       let po: any = null;

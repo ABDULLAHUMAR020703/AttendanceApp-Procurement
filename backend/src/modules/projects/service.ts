@@ -9,7 +9,6 @@ import {
   assertUserEligibleTeamLead,
   fetchProjectOrThrow,
 } from '../org/projectGuards';
-import { generateProjectPdf } from '../../utils/pdfGenerator';
 
 type CreateProjectInput = {
   name: string;
@@ -452,70 +451,3 @@ export async function updateProjectTeamLead(params: {
   return { project: updated };
 }
 
-function formatCurrency(amount: number): string {
-  if (!Number.isFinite(amount)) return '—';
-  return `${new Intl.NumberFormat('en-PK', { maximumFractionDigits: 2 }).format(amount)} PKR`;
-}
-
-export async function buildProjectPdf(params: { projectId: string }): Promise<Buffer> {
-  const { projectId } = params;
-  const { data: project, error: projectErr } = await supabaseAdmin
-    .from('projects')
-    .select('id, name, po_id, budget, status, created_by, created_at, updated_at')
-    .eq('id', projectId)
-    .maybeSingle();
-  if (projectErr) throw projectErr;
-  if (!project) throw new AppError('Project not found', 404);
-
-  const [creatorRes, poRes, prRes] = await Promise.all([
-    supabaseAdmin.from('users').select('id, name, email').eq('id', project.created_by).maybeSingle(),
-    project.po_id
-      ? supabaseAdmin
-          .from('purchase_orders')
-          .select('id, po, po_number, customer, total_value, remaining_value')
-          .eq('id', project.po_id)
-          .maybeSingle()
-      : Promise.resolve({ data: null, error: null }),
-    supabaseAdmin
-      .from('purchase_requests')
-      .select('id, description, amount, status, created_at')
-      .eq('project_id', projectId)
-      .order('created_at', { ascending: false })
-      .limit(20),
-  ]);
-  if (creatorRes.error) throw creatorRes.error;
-  if (poRes.error) throw poRes.error;
-  if (prRes.error) throw prRes.error;
-
-  const totalBudget = Number(
-    (poRes.data as { total_value?: number | null } | null)?.total_value ?? Number(project.budget),
-  );
-  const remainingAmount = Number(
-    (poRes.data as { remaining_value?: number | null } | null)?.remaining_value ?? Number(project.budget),
-  );
-  const consumedAmount = Math.max(0, totalBudget - remainingAmount);
-
-  return await generateProjectPdf({
-    id: String(project.id),
-    projectName: String(project.name),
-    projectCode: String(project.id).slice(0, 8).toUpperCase(),
-    customer: String((poRes.data as { customer?: string | null } | null)?.customer ?? '—'),
-    linkedPo: String((poRes.data as { po?: string | null; po_number?: string | null } | null)?.po ?? (poRes.data as { po_number?: string | null } | null)?.po_number ?? 'No linked PO'),
-    totalBudget: formatCurrency(totalBudget),
-    consumedAmount: formatCurrency(consumedAmount),
-    remainingAmount: formatCurrency(remainingAmount),
-    status: String(project.status),
-    createdBy:
-      String((creatorRes.data as { name?: string | null; email?: string | null } | null)?.name ?? '') ||
-      String((creatorRes.data as { email?: string | null } | null)?.email ?? 'Unknown'),
-    createdAt: new Date(String(project.created_at)).toLocaleString(),
-    updatedAt: new Date(String(project.updated_at ?? project.created_at)).toLocaleString(),
-    relatedPrs: (prRes.data ?? []).map((r) => ({
-      id: String(r.id).slice(0, 8),
-      description: String(r.description ?? ''),
-      amount: formatCurrency(Number(r.amount)),
-      status: String(r.status),
-      createdAt: new Date(String(r.created_at)).toLocaleString(),
-    })),
-  });
-}

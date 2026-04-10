@@ -91,17 +91,3 @@ export async function authedFetchWithSupabase<T>(
   return authedFetch<T>(path, token, init);
 }
 
-/** Read error body for PDF endpoints (often JSON `{ message }`, sometimes plain text). */
-export async function readPdfDownloadErrorMessage(res: Response, fallback: string): Promise<string> {
-  const text = await res.text();
-  console.error('PDF ERROR:', text);
-  try {
-    const j = JSON.parse(text) as { message?: string };
-    if (typeof j.message === 'string' && j.message.trim()) return j.message.trim();
-  } catch {
-    /* not JSON */
-  }
-  const t = text.trim();
-  if (t) return t.length > 400 ? `${t.slice(0, 400)}…` : t;
-  return fallback;
-}

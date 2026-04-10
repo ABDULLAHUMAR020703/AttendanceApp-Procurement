@@ -12,7 +12,6 @@ import {
   type PoAnchor,
 } from './poLineContext';
 import { assertActorMaySubmitPurchaseRequestForProject } from '../projects/projectAccess';
-import { generatePRPdf } from '../../utils/pdfGenerator';
 
 export { normalizeItemCode } from '../../utils/itemCode';
 
@@ -297,106 +296,4 @@ export async function createPurchaseRequest(params: {
   return { pr };
 }
 
-function formatCurrency(amount: number): string {
-  if (!Number.isFinite(amount)) return '—';
-  return `${new Intl.NumberFormat('en-PK', { maximumFractionDigits: 2 }).format(amount)} PKR`;
-}
-
-export async function buildPurchaseRequestPdf(params: { requestId: string }): Promise<Buffer> {
-  const { requestId } = params;
-  const { data: pr, error: prErr } = await supabaseAdmin
-    .from('purchase_requests')
-    .select(
-      'id, project_id, description, amount, status, created_at, created_by, requested_quantity, item_code, po_line_id',
-    )
-    .eq('id', requestId)
-    .maybeSingle();
-  if (prErr) throw prErr;
-  if (!pr) throw new AppError('Purchase request not found', 404);
-
-  const { data: project, error: projectErr } = await supabaseAdmin
-    .from('projects')
-    .select('id, name, department_id, po_id, budget')
-    .eq('id', pr.project_id)
-    .maybeSingle();
-  if (projectErr) throw projectErr;
-
-  const [requesterRes, approvalsRes, poLineRes] = await Promise.all([
-    supabaseAdmin.from('users').select('id, name, email, department').eq('id', pr.created_by).maybeSingle(),
-    supabaseAdmin
-      .from('approvals')
-      .select('id, role, status, created_at, updated_at, approver_id, comments')
-      .eq('request_id', requestId)
-      .order('created_at', { ascending: true }),
-    pr.po_line_id
-      ? supabaseAdmin
-          .from('purchase_orders')
-          .select('id, item_code, description, unit_price, po, po_line_sn')
-          .eq('id', pr.po_line_id)
-          .maybeSingle()
-      : Promise.resolve({ data: null, error: null }),
-  ]);
-  if (requesterRes.error) throw requesterRes.error;
-  if (approvalsRes.error) throw approvalsRes.error;
-  if (poLineRes.error) throw poLineRes.error;
-
-  const approvals = approvalsRes.data ?? [];
-  const approverIds = [...new Set(approvals.map((a) => a.approver_id as string).filter(Boolean))];
-  let approverMap = new Map<string, { name: string | null; email: string | null }>();
-  if (approverIds.length > 0) {
-    const { data: users, error: usersErr } = await supabaseAdmin
-      .from('users')
-      .select('id, name, email')
-      .in('id', approverIds);
-    if (usersErr) throw usersErr;
-    approverMap = new Map(
-      (users ?? []).map((u) => [u.id as string, { name: (u.name as string | null) ?? null, email: (u.email as string | null) ?? null }]),
-    );
-  }
-
-  const qty = Number((pr.requested_quantity as number | null) ?? 1);
-  const safeQty = Number.isFinite(qty) && qty > 0 ? qty : 1;
-  const unitPriceFromLine = Number((poLineRes.data as { unit_price?: number | null } | null)?.unit_price ?? 0);
-  const unitPrice = unitPriceFromLine > 0 ? unitPriceFromLine : Number(pr.amount) / safeQty;
-
-  const poRef = project?.po_id
-    ? `PO ${String((poLineRes.data as { po?: string | null } | null)?.po ?? project.po_id)}`
-    : `Project budget ${formatCurrency(Number(project?.budget ?? 0))}`;
-
-  const comments = approvals
-    .map((a) => (a.comments as string | null)?.trim())
-    .filter((v): v is string => Boolean(v));
-
-  return await generatePRPdf({
-    id: String(pr.id),
-    requestedBy:
-      String((requesterRes.data as { name?: string | null; email?: string | null } | null)?.name ?? '') ||
-      String((requesterRes.data as { email?: string | null } | null)?.email ?? 'Unknown'),
-    department: String((requesterRes.data as { department?: string | null } | null)?.department ?? project?.department_id ?? '—'),
-    createdAt: new Date(String(pr.created_at)).toLocaleString(),
-    status: String(pr.status),
-    projectName: String(project?.name ?? '—'),
-    notes: comments.length > 0 ? comments.join(' | ') : '—',
-    itemName: String(
-      (poLineRes.data as { item_code?: string | null } | null)?.item_code ??
-        (pr.item_code as string | null) ??
-        'Requested item',
-    ),
-    itemDescription: String((poLineRes.data as { description?: string | null } | null)?.description ?? pr.description),
-    quantity: safeQty.toString(),
-    unitPrice: formatCurrency(unitPrice),
-    total: formatCurrency(Number(pr.amount)),
-    totalAmount: formatCurrency(Number(pr.amount)),
-    budgetOrPoReference: poRef,
-    approvals: approvals.map((a) => {
-      const user = approverMap.get(a.approver_id as string);
-      return {
-        role: String(a.role),
-        approverName: user?.name || user?.email || String(a.approver_id),
-        status: String(a.status),
-        timestamp: a.updated_at ? new Date(String(a.updated_at)).toLocaleString() : '—',
-      };
-    }),
-  });
-}
 
