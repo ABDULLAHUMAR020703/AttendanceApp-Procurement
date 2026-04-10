@@ -1,4 +1,27 @@
-import puppeteer from 'puppeteer';
+import type { Browser } from 'puppeteer-core';
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+async function launchBrowserForPdf(): Promise<Browser> {
+  if (isProduction) {
+    const chromium = (await import('@sparticuz/chromium')).default;
+    const puppeteer = (await import('puppeteer-core')).default;
+    const executablePath = await chromium.executablePath();
+    // @sparticuz/chromium v143+: use args + bundled binary; headless set explicitly for puppeteer-core.
+    return puppeteer.launch({
+      args: chromium.args,
+      executablePath,
+      headless: true,
+    });
+  }
+
+  const puppeteer = (await import('puppeteer')).default;
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim() || undefined;
+  return puppeteer.launch({
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+  });
+}
 
 type PrPdfData = {
   id: string;
@@ -90,14 +113,9 @@ function pageShell(title: string, body: string, watermark?: string): string {
 }
 
 async function renderHtmlToPdfBuffer(html: string): Promise<Buffer> {
-  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim() || undefined;
-  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+  let browser: Browser | null = null;
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      executablePath,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    });
+    browser = await launchBrowserForPdf();
     const page = await browser.newPage();
     // Avoid networkidle0: static setContent often never reaches "idle" and can hang or time out → 500.
     page.setDefaultNavigationTimeout(60_000);

@@ -268,8 +268,13 @@ purchaseRequestsRouter.get(
       res.status(200);
       return res.end(pdfBuffer);
     } catch (err) {
-      console.error('PDF GENERATION ERROR:', err, { id: rawId, userId, role, kind: 'pr-route' });
-      next(err);
+      console.error('PDF ERROR:', err);
+      if (res.headersSent) return;
+      if (err instanceof AppError) {
+        return res.status(err.statusCode).json({ message: err.message });
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({ message });
     }
   },
 );
