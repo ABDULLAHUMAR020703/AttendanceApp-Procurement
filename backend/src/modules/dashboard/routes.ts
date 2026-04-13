@@ -1,12 +1,52 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { requireAuth } from '../../middleware/auth';
 import { supabaseAdmin } from '../../config/supabase';
+import { AppError } from '../../utils/errors';
 import { bypassesDepartmentScope } from '../auth/types';
+import { fetchDashboardDepartmentsBreakdown } from './departmentsBreakdown';
 import { fetchActivityFeed } from './service';
+import { hasPermission, requireAnyPermission } from '../../middleware/permissions';
+import type { AppPermission } from '../permissions/types';
 
 export const dashboardRouter = Router();
 
 dashboardRouter.use(requireAuth);
+dashboardRouter.use(requireAnyPermission());
+
+const SectionSchema = z.enum(['projects', 'approvals', 'exceptions', 'po']);
+
+const SECTION_PERMISSION: Record<z.infer<typeof SectionSchema>, AppPermission> = {
+  projects: 'view_projects',
+  approvals: 'view_approvals',
+  exceptions: 'manage_exceptions',
+  po: 'view_pos',
+};
+
+dashboardRouter.get('/departments', async (req, res, next) => {
+  try {
+    const q = SectionSchema.safeParse(req.query.section);
+    if (!q.success) {
+      return res.status(400).json({ message: 'Query "section" must be one of: projects, approvals, exceptions, po' });
+    }
+    if (!hasPermission(req, SECTION_PERMISSION[q.data])) {
+      throw new AppError('Missing required permission for this section', 403);
+    }
+    const role = req.auth!.role;
+    const actorDepartment = req.auth!.department ?? null;
+    if (!bypassesDepartmentScope(role) && !actorDepartment) {
+      throw new AppError('Department is required for your role to load this view', 403);
+    }
+    const payload = await fetchDashboardDepartmentsBreakdown({
+      section: q.data,
+      actorRole: role,
+      actorDepartment,
+    });
+    res.json(payload);
+  } catch (err) {
+    next(err);
+  }
+});
 
 dashboardRouter.get('/', async (req, res, next) => {
   try {

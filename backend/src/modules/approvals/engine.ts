@@ -1,3 +1,4 @@
+import { appEmailSubject } from '../../config/appMeta';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { writeApprovalAuditLogs, writeAuditLog } from '../auditLogs/service';
@@ -76,7 +77,7 @@ export async function startApprovalsForPurchaseRequest(prId: string, triggeredBy
         userId: firstApproval.approver_id as string,
         type: 'pr_approval_pending',
         message,
-        emailSubject: 'PR Approval Pending',
+        emailSubject: appEmailSubject('PR Approval Pending'),
       },
     ],
   });
@@ -264,7 +265,7 @@ async function performAdminForceApprove(params: {
       userId: pr.created_by,
       type: 'pr_approved',
       message: `Purchase Request ${pr.id} was fully approved (administrator force approve).`,
-      emailSubject: 'PR Approved',
+      emailSubject: appEmailSubject('PR Approved'),
     },
   ]);
 
@@ -332,7 +333,7 @@ async function performAdminRejectEntirePr(params: {
         userId: pr.created_by,
         type: 'pr_rejected',
         message: `Purchase Request ${pr.id} was rejected by an administrator.`,
-        emailSubject: 'PR Rejected',
+        emailSubject: appEmailSubject('PR Rejected'),
       },
     ],
   });
@@ -512,7 +513,7 @@ export async function decideApproval(params: {
           userId: pr.created_by as string,
           type: 'pr_rejected',
           message: `Purchase Request ${pr.id} was rejected at the ${approval.role} stage.`,
-          emailSubject: 'PR Rejected',
+          emailSubject: appEmailSubject('PR Rejected'),
         },
       ],
     });
@@ -549,7 +550,7 @@ export async function decideApproval(params: {
           userId: nextApproval.approver_id as string,
           type: 'pr_approval_pending',
           message: `Purchase Request ${pr.id} is ready for your ${humanizeStageLabel(nextRole as ApprovalStageRole)}.`,
-          emailSubject: 'PR Approval Pending',
+          emailSubject: appEmailSubject('PR Approval Pending'),
         },
       ],
     });
@@ -609,7 +610,7 @@ export async function decideApproval(params: {
       userId: pr.created_by as string,
       type: 'pr_approved',
       message: `Purchase Request ${pr.id} was fully approved.`,
-      emailSubject: 'PR Approved',
+      emailSubject: appEmailSubject('PR Approved'),
     },
   ]);
 
@@ -674,7 +675,7 @@ export async function adminOverridePurchaseRequest(params: {
         userId: pr.created_by as string,
         type: 'pr_rejected',
         message: `Purchase Request ${pr.id} was rejected by an administrator (override).`,
-        emailSubject: 'PR Rejected',
+        emailSubject: appEmailSubject('PR Rejected'),
       },
     ]);
   } else {
@@ -758,7 +759,7 @@ export async function adminOverridePurchaseRequest(params: {
         userId: pr.created_by as string,
         type: 'pr_approved',
         message: `Purchase Request ${pr.id} was fully approved (administrator override).`,
-        emailSubject: 'PR Approved',
+        emailSubject: appEmailSubject('PR Approved'),
       },
     ]);
   }

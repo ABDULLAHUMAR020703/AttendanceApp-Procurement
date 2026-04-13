@@ -1,12 +1,13 @@
 import React from 'react';
 import Link from 'next/link';
 import { BrandLogo } from './BrandLogo';
+import { APP_NAME } from '@/lib/appMeta';
 
 export default function Header() {
   return (
     <header className="absolute top-0 left-0 w-full flex items-center justify-between px-8 py-6 z-10 text-slate-200">
       <BrandLogo size="md">
-        <span className="font-bold tracking-widest text-sm uppercase">hadir.ai</span>
+        <span className="font-bold tracking-tight text-sm">{APP_NAME}</span>
       </BrandLogo>
       
       <nav className="hidden md:flex items-center gap-8 text-xs font-semibold tracking-wider text-slate-400">

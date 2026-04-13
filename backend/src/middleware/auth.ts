@@ -2,6 +2,9 @@ import type { RequestHandler } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { AppError } from '../utils/errors';
 import { bypassesDepartmentScope, type UserRole } from '../modules/auth/types';
+import type { AppPermission } from '../modules/permissions/types';
+import { APP_PERMISSIONS, isAppPermission } from '../modules/permissions/types';
+import { mergeEffectivePermissions } from '../modules/permissions/roleDefaults';
 
 export const requireAuth: RequestHandler = async (req, _res, next) => {
   const header = req.header('Authorization');
@@ -28,6 +31,21 @@ export const requireAuth: RequestHandler = async (req, _res, next) => {
   }
 
   const role = profile.role as UserRole;
+  let permissions: AppPermission[] = [];
+  if (bypassesDepartmentScope(role)) {
+    permissions = [...APP_PERMISSIONS];
+  } else {
+    const { data: permRows, error: permErr } = await supabaseAdmin
+      .from('user_permissions')
+      .select('permission')
+      .eq('user_id', userId);
+    if (permErr) return next(new AppError('Failed to load permissions', 500, permErr));
+    const fromDb = (permRows ?? [])
+      .map((r) => r.permission as string)
+      .filter(isAppPermission);
+    permissions = mergeEffectivePermissions(role, fromDb);
+  }
+
   req.auth = {
     userId,
     role,
@@ -35,6 +53,7 @@ export const requireAuth: RequestHandler = async (req, _res, next) => {
     name: profile.name ?? null,
     email: profile.email ?? null,
     orgWideAccess: bypassesDepartmentScope(role),
+    permissions,
   };
 
   return next();

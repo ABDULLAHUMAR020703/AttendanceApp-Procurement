@@ -1,10 +1,11 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { Providers } from './providers';
+import { APP_DESCRIPTION, APP_NAME } from '@/lib/appMeta';
 
 export const metadata: Metadata = {
-  title: 'Procurement Management System',
-  description: 'PMS web app',
+  title: APP_NAME,
+  description: APP_DESCRIPTION,
   icons: {
     icon: '/logo.png',
     apple: '/logo.png',

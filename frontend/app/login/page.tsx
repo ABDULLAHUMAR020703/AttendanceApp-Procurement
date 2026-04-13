@@ -7,6 +7,7 @@ import InteractiveBackground from '../../components/InteractiveBackground';
 import { BrandLogo } from '../../components/BrandLogo';
 import Link from 'next/link';
 import { User, Lock } from 'lucide-react';
+import { APP_NAME } from '@/lib/appMeta';
 
 export default function LoginPage() {
   const { signIn, session, profile } = useAuth();
@@ -42,7 +43,7 @@ export default function LoginPage() {
       {/* Header matching Landing Page but simpler */}
       <header className="absolute top-0 left-0 w-full flex items-center justify-between px-8 py-6 z-20">
         <BrandLogo size="md">
-          <span className="font-bold tracking-widest text-sm uppercase">hadir.ai</span>
+          <span className="font-bold tracking-tight text-sm text-slate-200">{APP_NAME}</span>
         </BrandLogo>
         
         <nav className="hidden md:flex items-center gap-8 text-xs font-semibold tracking-wider text-slate-400">
@@ -144,11 +145,12 @@ export default function LoginPage() {
         <div className="w-full md:w-1/2 flex flex-col justify-center pl-0 md:pl-16">
           <BrandLogo size="lg" className="mb-6 hidden md:flex" />
           <h1 className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-purple-200 tracking-tight leading-none mb-6">
-            hadir.AI<br />
-            Procurement.
+            {APP_NAME}
+            <br />
+            <span className="text-4xl md:text-6xl">Procurement</span>
           </h1>
           <p className="text-slate-300 text-base md:text-lg leading-relaxed max-w-md font-medium">
-            Automate your entire procurement workflow with role-based approvals, exception handling, and budget/PO tracking. From PO generation to GM approval, securely manage all spending centrally.
+            Sign in to manage approvals, exceptions, and budgets with {APP_NAME}.
           </p>
         </div>
 
@@ -156,9 +158,11 @@ export default function LoginPage() {
 
       <footer className="absolute bottom-6 left-8 right-8 flex justify-between items-center text-[10px] text-slate-500 tracking-widest">
         <BrandLogo size="sm">
-          <span>2026 hadir.AI Procurement</span>
+          <span>
+            © {new Date().getFullYear()} {APP_NAME}
+          </span>
         </BrandLogo>
-        <span>Powered by HADIR</span>
+        <span className="text-slate-600">Procurement workspace</span>
       </footer>
     </div>
   );

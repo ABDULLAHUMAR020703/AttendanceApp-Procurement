@@ -12,21 +12,9 @@ import { Table, TBody, TD, TH, THead, TR, TableWrapper } from '../../../componen
 import { useAuth, type Department, type UserRole } from '../../../features/auth/AuthProvider';
 import { ApiError, authedFetchWithSupabase, NoSessionError } from '../../../lib/api';
 
-const DEPARTMENTS: Department[] = [
-  'sales',
-  'hr',
-  'technical',
-  'finance',
-  'engineering',
-  'management',
-  'ibs',
-  'power',
-  'civil_works',
-  'bss_wireless',
-  'fixed_network',
-  'warehouse',
-];
 const ROLES: UserRole[] = ['admin', 'pm', 'dept_head', 'employee'];
+
+type DeptOption = { code: string; display_name: string };
 
 type UserRow = {
   id: string;
@@ -55,6 +43,21 @@ export default function AdminUsersPage() {
       }
     },
   });
+
+  const { data: departmentsData } = useQuery({
+    queryKey: ['departments'],
+    enabled: !!token && !!supabase && profile?.role === 'admin',
+    queryFn: async () => {
+      try {
+        return await authedFetchWithSupabase<{ departments: DeptOption[] }>(supabase!, '/api/departments');
+      } catch (e) {
+        if (e instanceof NoSessionError) router.replace('/login');
+        throw e;
+      }
+    },
+  });
+
+  const departmentOptions = departmentsData?.departments ?? [];
 
   const patchMutation = useMutation({
     mutationFn: async (params: { id: string; role?: UserRole; department?: Department }) => {
@@ -152,9 +155,9 @@ export default function AdminUsersPage() {
                               }))
                             }
                           >
-                            {DEPARTMENTS.map((d) => (
-                              <option key={d} value={d}>
-                                {d}
+                            {departmentOptions.map((d) => (
+                              <option key={d.code} value={d.code}>
+                                {d.display_name}
                               </option>
                             ))}
                           </select>

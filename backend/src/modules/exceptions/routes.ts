@@ -3,10 +3,12 @@ import { requireAuth } from '../../middleware/auth';
 import { requireRole } from '../../middleware/rbac';
 import { z } from 'zod';
 import { decideException, listPendingExceptionsForActor } from './service';
+import { requirePermission } from '../../middleware/permissions';
 
 export const exceptionsRouter = Router();
 
 exceptionsRouter.use(requireAuth);
+exceptionsRouter.use(requirePermission('manage_exceptions'));
 
 exceptionsRouter.get('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {

@@ -3,6 +3,7 @@ import Header from '../components/Header';
 import InteractiveBackground from '../components/InteractiveBackground';
 import { BrandLogo } from '../components/BrandLogo';
 import Link from 'next/link';
+import { APP_NAME } from '@/lib/appMeta';
 
 export default function LandingPage() {
   return (
@@ -14,11 +15,12 @@ export default function LandingPage() {
         <div className="max-w-3xl space-y-6 mt-16">
           <BrandLogo size="xl" className="justify-center mb-2" />
           <h1 className="text-6xl md:text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-purple-200 tracking-tight leading-tight">
-            hadir.AI<br />
-            Procurement.
+            {APP_NAME}
+            <br />
+            <span className="text-5xl md:text-7xl">Procurement</span>
           </h1>
           <p className="text-slate-300 text-lg md:text-xl leading-relaxed max-w-2xl mx-auto font-medium">
-            Automate your entire procurement workflow with role-based approvals, exception handling, and budget/PO tracking. From PO generation to GM approval, securely manage all spending.
+            Automate procurement with role-based approvals, exception handling, and budget / PO tracking—from PO lines to final sign-off, all in one place.
           </p>
           <div className="pt-8">
             <Link 

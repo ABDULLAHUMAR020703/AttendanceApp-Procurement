@@ -4,7 +4,11 @@ import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
+import { AnimatePresence, motion } from 'framer-motion';
 import { AppLayout } from '../../components/AppLayout';
+import { DashboardCard } from '../../components/dashboard/DashboardCard';
+import { ExpandedDashboardView } from '../../components/dashboard/ExpandedDashboardView';
+import type { DashboardDrillCard } from '../../components/dashboard/dashboardTypes';
 import { AuditHistoryModal } from '../../components/AuditHistoryModal';
 import { LastUpdatedMeta, LastUpdatedPanel } from '../../components/LastUpdatedPanel';
 import { Card } from '../../components/ui/Card';
@@ -12,6 +16,7 @@ import { PageContainer } from '../../components/ui/PageContainer';
 import { PageHeader } from '../../components/ui/PageHeader';
 import { useAuth } from '../../features/auth/AuthProvider';
 import { authedFetchWithSupabase, NoSessionError } from '../../lib/api';
+import { APP_NAME } from '@/lib/appMeta';
 
 type ActivityFeedItem = {
   id: string;
@@ -150,6 +155,7 @@ export default function DashboardPage() {
   const [page, setPage] = useState(1);
   const [poHistoryAnchorId, setPoHistoryAnchorId] = useState<string | null>(null);
   const [activityDeptFilter, setActivityDeptFilter] = useState('');
+  const [activeDrillCard, setActiveDrillCard] = useState<DashboardDrillCard | null>(null);
   const pageSize = 8;
 
   const isAdmin = profile?.role === 'admin';
@@ -260,7 +266,13 @@ export default function DashboardPage() {
       <PageContainer className="space-y-6">
         <PageHeader
           title="Dashboard"
-          subtitle={profile?.role ? `Role: ${profile.role}` : session ? 'Loading role...' : 'Sign in required'}
+          subtitle={
+            profile?.role
+              ? `Welcome · ${APP_NAME} · Role: ${profile.role}`
+              : session
+                ? 'Loading role...'
+                : 'Sign in required'
+          }
         />
 
         {isFetching && !isLoading ? (
@@ -273,24 +285,51 @@ export default function DashboardPage() {
           <Card className="p-4 text-sm text-rose-300">{error instanceof Error ? error.message : 'Failed to load dashboard'}</Card>
         ) : (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            <Card className="p-4">
-              <div className="text-sm text-muted-foreground">Projects</div>
-              <div className="text-2xl font-semibold mt-1">{data?.projects ?? 0}</div>
-            </Card>
-            <Card className="p-4">
-              <div className="text-sm text-muted-foreground">Pending Approvals</div>
-              <div className="text-2xl font-semibold mt-1">{data?.pendingApprovals ?? 0}</div>
-            </Card>
-            <Card className="p-4">
-              <div className="text-sm text-muted-foreground">Pending Exceptions</div>
-              <div className="text-2xl font-semibold mt-1">{data?.pendingExceptions ?? 0}</div>
-            </Card>
-            <Card className="p-4">
-              <div className="text-sm text-muted-foreground">PO Records</div>
-              <div className="text-2xl font-semibold mt-1">{data?.poRecords ?? 0}</div>
-            </Card>
-            </div>
+            <AnimatePresence mode="wait">
+              {activeDrillCard ? (
+                <ExpandedDashboardView
+                  key="drill"
+                  active={activeDrillCard}
+                  onBack={() => setActiveDrillCard(null)}
+                  supabase={supabase}
+                  onAuthError={() => router.replace('/login')}
+                />
+              ) : (
+                <motion.div
+                  key="summary-cards"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+                >
+                  <DashboardCard
+                    title="Projects"
+                    value={data?.projects ?? 0}
+                    onClick={() => setActiveDrillCard('projects')}
+                    accentClass="from-emerald-500/15 to-transparent"
+                  />
+                  <DashboardCard
+                    title="Pending Approvals"
+                    value={data?.pendingApprovals ?? 0}
+                    onClick={() => setActiveDrillCard('approvals')}
+                    accentClass="from-amber-500/15 to-transparent"
+                  />
+                  <DashboardCard
+                    title="Pending Exceptions"
+                    value={data?.pendingExceptions ?? 0}
+                    onClick={() => setActiveDrillCard('exceptions')}
+                    accentClass="from-rose-500/15 to-transparent"
+                  />
+                  <DashboardCard
+                    title="PO Records"
+                    value={data?.poRecords ?? 0}
+                    onClick={() => setActiveDrillCard('po')}
+                    accentClass="from-cyan-500/15 to-transparent"
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <Card className="p-4 space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">

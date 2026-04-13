@@ -1,7 +1,9 @@
 import { Router } from 'express';
+import type { Request } from 'express';
 import multer from 'multer';
 import { requireAuth } from '../../middleware/auth';
 import { requireRole } from '../../middleware/rbac';
+import { hasPermission, requirePermission } from '../../middleware/permissions';
 import { z } from 'zod';
 import { countPreviousPrsForSameItem, createPurchaseRequest, normalizeItemCode } from './service';
 import {
@@ -35,11 +37,41 @@ async function withPoLineSummaries(rows: Record<string, unknown>[]) {
 }
 
 purchaseRequestsRouter.use(requireAuth);
+purchaseRequestsRouter.use(requirePermission('view_projects'));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
+function redactPrListRow(req: Request, row: Record<string, unknown>): Record<string, unknown> {
+  if (hasPermission(req, 'view_budget')) return row;
+  return { ...row, amount: null, po_line_summary: null };
+}
+
+function stripPrDetailFinancials(req: Request, body: Record<string, unknown>): Record<string, unknown> {
+  if (hasPermission(req, 'view_budget')) return body;
+  const copy: Record<string, unknown> = { ...body };
+  if (copy.purchaseRequest && typeof copy.purchaseRequest === 'object') {
+    copy.purchaseRequest = {
+      ...(copy.purchaseRequest as Record<string, unknown>),
+      amount: null,
+      poLineSummary: null,
+    };
+  }
+  if (copy.project && typeof copy.project === 'object') {
+    copy.project = { ...(copy.project as Record<string, unknown>), budget: null };
+  }
+  if (copy.purchaseOrder && typeof copy.purchaseOrder === 'object') {
+    copy.purchaseOrder = {
+      ...(copy.purchaseOrder as Record<string, unknown>),
+      total_value: null,
+      remaining_value: null,
+    };
+  }
+  return copy;
+}
+
 purchaseRequestsRouter.post(
   '/',
+  requirePermission('view_budget'),
   requireRole('admin', 'pm', 'dept_head', 'employee'),
   upload.single('document'),
   async (req, res, next) => {
@@ -105,7 +137,8 @@ purchaseRequestsRouter.get(
         if (error) throw error;
         const withAudit = await attachLastUpdatedFields('purchase_request', data ?? []);
         const enriched = await withPoLineSummaries(withAudit as Record<string, unknown>[]);
-        return res.json({ purchaseRequests: enriched });
+        const visible = enriched.map((row) => redactPrListRow(req, row as Record<string, unknown>));
+        return res.json({ purchaseRequests: visible });
       }
 
       const { data: created, error: createdErr } = await supabaseAdmin
@@ -153,7 +186,8 @@ purchaseRequestsRouter.get(
       const merged = [...map.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 100);
       const withAudit = await attachLastUpdatedFields('purchase_request', merged);
       const enriched = await withPoLineSummaries(withAudit as Record<string, unknown>[]);
-      res.json({ purchaseRequests: enriched });
+      const visible = enriched.map((row) => redactPrListRow(req, row as Record<string, unknown>));
+      res.json({ purchaseRequests: visible });
     } catch (err) {
       next(err);
     }
@@ -375,7 +409,7 @@ purchaseRequestsRouter.get(
         anchor,
       );
 
-      res.json({
+      const detailPayload = {
         purchaseRequest: pr
           ? {
               id: pr.id,
@@ -401,7 +435,9 @@ purchaseRequestsRouter.get(
         approvals: enrichedApprovals,
         exceptions: exceptions ?? [],
         auditLogs,
-      });
+      };
+
+      res.json(stripPrDetailFinancials(req, detailPayload as Record<string, unknown>));
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[purchase-requests/:id] Failed to fetch', err);

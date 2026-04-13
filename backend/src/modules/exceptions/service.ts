@@ -1,3 +1,4 @@
+import { appEmailSubject } from '../../config/appMeta';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { recordTrackedAction } from '../auditLogs/trackedAction';
@@ -128,7 +129,7 @@ export async function decideException(params: {
             userId: project.created_by as string,
             type: 'exception_no_po_approved',
             message: `No-PO exception approved for project ${project.id}. You can now submit purchase requests.`,
-            emailSubject: 'No-PO Exception Approved',
+            emailSubject: appEmailSubject('No-PO Exception Approved'),
           },
         ],
       });
@@ -152,7 +153,7 @@ export async function decideException(params: {
             userId: project.created_by as string,
             type: 'exception_no_po_rejected',
             message: `No-PO exception rejected for project ${project.id}.`,
-            emailSubject: 'No-PO Exception Rejected',
+            emailSubject: appEmailSubject('No-PO Exception Rejected'),
           },
         ],
       });
@@ -198,7 +199,7 @@ export async function decideException(params: {
             userId: pr.created_by as string,
             type: 'exception_over_budget_approved',
             message: `Over-budget exception approved for PR ${pr.id}.`,
-            emailSubject: 'Over-Budget Exception Approved',
+            emailSubject: appEmailSubject('Over-Budget Exception Approved'),
           },
         ],
       });
@@ -232,7 +233,7 @@ export async function decideException(params: {
             userId: pr.created_by as string,
             type: 'exception_over_budget_rejected',
             message: `Over-budget exception rejected for PR ${pr.id}.`,
-            emailSubject: 'Over-Budget Exception Rejected',
+            emailSubject: appEmailSubject('Over-Budget Exception Rejected'),
           },
         ],
       });

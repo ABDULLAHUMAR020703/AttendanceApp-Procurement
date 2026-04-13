@@ -1,4 +1,4 @@
--- Procurement Management System (PMS) - Supabase schema
+-- Tehsil.ai procurement app — Supabase schema
 -- Notes:
 -- - Uses UUID primary keys and timestamptz timestamps.
 -- - "reference_id" in exceptions is intentionally polymorphic (can point to projects or purchase_requests).

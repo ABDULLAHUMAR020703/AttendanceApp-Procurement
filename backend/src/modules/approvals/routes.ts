@@ -7,6 +7,7 @@ import { supabaseAdmin } from '../../config/supabase';
 import { enrichPurchaseRequestsWithPoLine } from '../purchaseRequests/poLineContext';
 import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
 import { bypassesDepartmentScope } from '../auth/types';
+import { requirePermission } from '../../middleware/permissions';
 
 export const approvalsRouter = Router();
 
@@ -22,7 +23,7 @@ const OverrideSchema = z.object({
   reason: z.string().min(1).max(2000),
 });
 
-approvalsRouter.get('/', requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res, next) => {
+approvalsRouter.get('/', requirePermission('view_approvals'), requireRole('admin', 'pm', 'dept_head', 'employee'), async (req, res, next) => {
   try {
     const userId = req.auth!.userId;
     const role = req.auth!.role;
@@ -109,6 +110,7 @@ approvalsRouter.post(
 
 approvalsRouter.post(
   '/:id/decision',
+  requirePermission('approve_requests'),
   requireRole('admin', 'pm', 'dept_head', 'employee'),
   async (req, res, next) => {
     try {

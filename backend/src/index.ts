@@ -1,4 +1,5 @@
 import { createApp } from './app';
+import { APP_NAME } from './config/appMeta';
 
 const app = createApp();
 
@@ -10,6 +11,6 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console
-  console.log(`PMS backend listening on :${PORT}`);
+  console.log(`${APP_NAME} backend listening on :${PORT}`);
 });
 

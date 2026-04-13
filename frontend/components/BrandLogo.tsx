@@ -3,7 +3,7 @@ import { cn } from '@/lib/ui';
 
 const DIMS = {
   sm: { outer: 'w-6 h-6', wh: 22 },
-  md: { outer: 'w-8 h-8', wh: 30 },
+  md: { outer: 'w-10 h-10', wh: 40 },
   lg: { outer: 'w-16 h-16', wh: 60 },
   xl: { outer: 'w-28 h-28', wh: 104 },
 } as const;
@@ -30,15 +30,16 @@ export function BrandLogo({ size = 'md', padded, className, children }: BrandLog
       <div
         className={cn(
           'rounded-full border flex items-center justify-center backdrop-blur-sm overflow-hidden shrink-0',
+          children ? 'mr-2' : '',
           ring,
         )}
       >
         <Image
           src="/logo.png"
-          alt="hadir.AI"
+          alt="Tehsil T Procurement Logo"
           width={imgSize}
           height={imgSize}
-          className="object-contain p-0.5"
+          className="h-full w-full object-contain p-0.5"
           priority={size !== 'sm'}
         />
       </div>

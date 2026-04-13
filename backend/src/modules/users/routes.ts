@@ -4,27 +4,14 @@ import { requireRole } from '../../middleware/rbac';
 import { supabaseAdmin } from '../../config/supabase';
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
-import type { Department } from '../auth/types';
-import { bypassesDepartmentScope, DEPARTMENTS } from '../auth/types';
+import { bypassesDepartmentScope } from '../auth/types';
+import { assertDepartmentExists } from '../departments/service';
 
 export const usersRouter = Router();
 
 usersRouter.use(requireAuth);
 
-const DepartmentSchema = z.enum([
-  'sales',
-  'hr',
-  'technical',
-  'finance',
-  'engineering',
-  'management',
-  'ibs',
-  'power',
-  'civil_works',
-  'bss_wireless',
-  'fixed_network',
-  'warehouse',
-]);
+const DepartmentCodeSchema = z.string().min(1).max(64).regex(/^[a-z0-9_]+$/);
 const RoleSchema = z.enum(['admin', 'pm', 'dept_head', 'employee']);
 
 usersRouter.get('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
@@ -54,9 +41,7 @@ usersRouter.get('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, n
       if (!d) throw new AppError('Profile must have a department', 400);
       q = q.eq('department', d);
     } else if (bypassesDepartmentScope(role) && deptFilter) {
-      if (!DEPARTMENTS.includes(deptFilter as Department)) {
-        throw new AppError('Invalid department filter', 400);
-      }
+      await assertDepartmentExists(deptFilter);
       q = q.eq('department', deptFilter);
     }
 
@@ -70,7 +55,7 @@ usersRouter.get('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, n
 
 const PatchUserSchema = z.object({
   role: RoleSchema.optional(),
-  department: DepartmentSchema.optional(),
+  department: DepartmentCodeSchema.optional(),
   name: z.string().min(1).max(200).optional(),
 });
 
@@ -89,6 +74,10 @@ usersRouter.patch('/:id', requireRole('admin'), async (req, res, next) => {
       .eq('id', userId)
       .single();
     if (loadErr || !row) throw loadErr ?? new AppError('User not found', 404);
+
+    if (parsed.department !== undefined) {
+      await assertDepartmentExists(parsed.department);
+    }
 
     const merged = {
       name: parsed.name ?? row.name,

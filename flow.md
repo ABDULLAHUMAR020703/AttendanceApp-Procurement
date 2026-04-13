@@ -1,6 +1,6 @@
-# 🚀 Hadir.ai Procurement System – Walkthrough Guide
+# 🚀 Tehsil.ai — Procurement Walkthrough Guide
 
-This guide explains how to use the procurement workflow system step by step, including roles, actions, and flow of data.
+This guide explains how to use the Tehsil.ai procurement workflow step by step, including roles, actions, and flow of data.
 
 ---
 

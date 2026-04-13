@@ -1,8 +1,8 @@
-# Attendance_procurement - Full Application Context
+# Tehsil.ai — Full Application Context
 
 ## What This Application Is
 
-This repository is a full-stack procurement workflow platform (despite the repository name including "Attendance"). The implemented business domain is procurement approvals, exception handling, and budget/PO tracking.
+This repository is the **Tehsil.ai** full-stack procurement workflow platform (repository folder name may still reflect an older label). The business domain is procurement approvals, exception handling, and budget/PO tracking.
 
 At a high level:
 

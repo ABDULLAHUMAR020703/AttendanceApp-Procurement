@@ -4,22 +4,13 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 import type { Session, SupabaseClient } from '@supabase/supabase-js';
 import { useQueryClient } from '@tanstack/react-query';
 import { getBrowserSupabase } from '../../lib/supabase-browser';
+import type { AppPermissionId } from '@/lib/permissions';
+import { APP_PERMISSION_IDS } from '@/lib/permissions';
 
 export type UserRole = 'admin' | 'pm' | 'dept_head' | 'employee';
 
-export type Department =
-  | 'sales'
-  | 'hr'
-  | 'technical'
-  | 'finance'
-  | 'engineering'
-  | 'management'
-  | 'ibs'
-  | 'power'
-  | 'civil_works'
-  | 'bss_wireless'
-  | 'fixed_network'
-  | 'warehouse';
+/** `departments.code` from the API (dynamic list). */
+export type Department = string;
 
 export type UserProfile = {
   userId: string;
@@ -27,6 +18,8 @@ export type UserProfile = {
   department?: string | null;
   name?: string | null;
   email?: string | null;
+  /** Effective app permissions (non-admin). Admins bypass checks server-side. */
+  permissions?: AppPermissionId[];
 };
 
 type AuthContextValue = {
@@ -80,11 +73,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     if (!res.ok) throw new Error('Failed to fetch profile from backend');
     const json = (await res.json()) as {
-      user: { userId: string; role: UserRole; department?: string | null; name?: string | null; email?: string | null };
+      user: {
+        userId: string;
+        role: UserRole;
+        department?: string | null;
+        name?: string | null;
+        email?: string | null;
+        permissions?: string[];
+      };
     };
 
     const raw = json.user as Record<string, unknown>;
     const userId = (raw.userId ?? raw.user_id) as string;
+
+    const permRaw = json.user.permissions;
+    const permissions: AppPermissionId[] | undefined =
+      json.user.role === 'admin'
+        ? undefined
+        : Array.isArray(permRaw)
+          ? (permRaw.filter((p): p is AppPermissionId =>
+              (APP_PERMISSION_IDS as readonly string[]).includes(p as string),
+            ) as AppPermissionId[])
+          : [];
 
     setProfile({
       userId,
@@ -92,6 +102,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       department: json.user.department ?? null,
       name: json.user.name ?? null,
       email: json.user.email ?? null,
+      permissions,
     });
   };
 

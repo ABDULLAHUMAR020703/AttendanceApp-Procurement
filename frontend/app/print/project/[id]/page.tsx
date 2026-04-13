@@ -4,60 +4,26 @@ import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useMemo, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../../../features/auth/AuthProvider';
-import { authedFetchWithSupabase, formatPkr, NoSessionError } from '../../../../lib/api';
+import { authedFetchWithSupabase, NoSessionError } from '../../../../lib/api';
+import type { PrintProjectDetailResponse } from '../../../../lib/printDocumentTypes';
+import { APP_NAME } from '@/lib/appMeta';
+import { PrintDocumentStyles } from '../../../../components/print/PrintDocumentStyles';
+import { formatPkrSafe, na, prStatusBadgeClasses, projectStatusBadgeClasses } from '../../../../components/print/printUi';
 
-type UserLite = {
-  id: string;
-  name: string | null;
-  email: string | null;
-  role: string;
-  job_title?: string | null;
-};
-
-type ProjectPrintResponse = {
-  project: {
-    id: string;
-    name: string;
-    po_id: string | null;
-    budget: number;
-    status: string;
-    department_id: string;
-    department_label?: string;
-    created_at: string;
-    updated_at?: string;
-    pm: UserLite | null;
-    team_lead: UserLite | null;
-    assigned_employees: UserLite[];
-  };
-  purchaseOrder: {
-    id: string;
-    po_number: string | null;
-    vendor: string | null;
-    po: string | null;
-    total_value: number;
-    remaining_value: number;
-  } | null;
-  relatedPurchaseRequests?: Array<{
-    id: string;
-    description: string;
-    amount: number;
-    status: string;
-    created_at: string;
-  }>;
-};
-
-function statusBadgeClass(status: string) {
-  const u = status.toLowerCase();
-  if (u === 'active') return 'print-badge print-badge--approved';
-  if (u === 'archived') return 'print-badge print-badge--rejected';
-  return 'print-badge print-badge--pending';
-}
-
-function watermarkForProjectStatus(status: string) {
+function watermarkLabel(status: string) {
   const u = status.toLowerCase();
   if (u === 'active') return 'ACTIVE';
   if (u === 'archived') return 'ARCHIVED';
   return status.toUpperCase();
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="space-y-3">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">{title}</h2>
+      {children}
+    </section>
+  );
 }
 
 export default function PrintProjectPage() {
@@ -73,7 +39,7 @@ export default function PrintProjectPage() {
     enabled: Boolean(supabase && id && canPrint),
     queryFn: async () => {
       try {
-        return await authedFetchWithSupabase<ProjectPrintResponse>(
+        return await authedFetchWithSupabase<PrintProjectDetailResponse>(
           supabase!,
           `/api/projects/${id}?include=related_prs`,
         );
@@ -87,9 +53,10 @@ export default function PrintProjectPage() {
   useEffect(() => {
     if (!data?.project || printedRef.current) return;
     printedRef.current = true;
+    document.title = `Tehsil — Project ${id.slice(0, 8)}`;
     const t = window.setTimeout(() => window.print(), 500);
     return () => window.clearTimeout(t);
-  }, [data]);
+  }, [data, id]);
 
   const financial = useMemo(() => {
     if (!data?.project) return null;
@@ -100,21 +67,23 @@ export default function PrintProjectPage() {
     return { totalBudget, remaining, consumed };
   }, [data]);
 
+  const outer = 'print-page-root min-h-screen bg-gray-100 py-6 text-gray-800 print:py-0 print:bg-white';
+
   if (!canPrint) {
     return (
-      <div className="print-root">
-        <div className="print-doc">
-          <p>Print is only available to administrators and project managers.</p>
-        </div>
+      <div className={outer}>
+        <PrintDocumentStyles />
+        <div className="mx-auto max-w-[800px] bg-white p-8 text-sm text-gray-600">Print is only available to administrators and project managers.</div>
       </div>
     );
   }
 
   if (isLoading) {
     return (
-      <div className="print-root">
-        <div className="print-doc">
-          <p>Loading…</p>
+      <div className={outer}>
+        <PrintDocumentStyles />
+        <div className="mx-auto max-w-[800px] rounded-lg border border-gray-200 bg-white p-8 text-sm text-gray-600 shadow-sm print:shadow-none print:border-0">
+          Loading…
         </div>
       </div>
     );
@@ -122,9 +91,10 @@ export default function PrintProjectPage() {
 
   if (error || !data?.project) {
     return (
-      <div className="print-root">
-        <div className="print-doc">
-          <p className="text-rose-700">{error instanceof Error ? error.message : 'Could not load project.'}</p>
+      <div className={outer}>
+        <PrintDocumentStyles />
+        <div className="mx-auto max-w-[800px] bg-white p-8 text-sm text-red-700">
+          {error instanceof Error ? error.message : 'Could not load project.'}
         </div>
       </div>
     );
@@ -133,120 +103,162 @@ export default function PrintProjectPage() {
   const p = data.project;
   const po = data.purchaseOrder;
   const prs = data.relatedPurchaseRequests ?? [];
-  const wm = watermarkForProjectStatus(p.status);
+  const wm = watermarkLabel(p.status);
   const shortCode = p.id.slice(0, 8).toUpperCase();
+  const reportDate = p.updated_at
+    ? new Date(p.updated_at).toLocaleString()
+    : new Date(p.created_at).toLocaleString();
+
+  const employees =
+    p.assigned_employees.length > 0
+      ? p.assigned_employees.map((e) => e.name || e.email || e.id).join(', ')
+      : 'N/A';
+
+  const poLine = po
+    ? `${na(po.po?.trim() || po.po_number?.trim() || po.id.slice(0, 8))}${po.vendor ? ` · ${po.vendor}` : ''}`
+    : 'N/A';
 
   return (
-    <div className="print-root">
-      <div className="print-watermark">{wm}</div>
-      <div className="print-doc">
-        <div className="print-doc-inner">
-          <header className="print-header-brand">
-            <div className="print-logo" aria-hidden>
-              Logo
+    <div className={outer}>
+      <PrintDocumentStyles />
+
+      <div
+        className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center text-7xl font-bold uppercase tracking-widest text-gray-200/50 print:text-gray-300/40"
+        aria-hidden
+        style={{ transform: 'rotate(-18deg)' }}
+      >
+        {wm}
+      </div>
+
+      <div className="print-container relative z-[1] mx-auto max-w-[800px] rounded-lg border border-gray-200 bg-white p-8 shadow-sm print:shadow-none">
+        <header className="mb-8 flex flex-col gap-6 border-b border-gray-200 pb-6 sm:flex-row sm:justify-between sm:gap-4">
+          <div className="space-y-1">
+            <p className="text-lg font-semibold text-gray-900">{APP_NAME}</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Official Document</p>
+          </div>
+          <div className="space-y-2 text-right sm:max-w-[55%]">
+            <p className="text-lg font-semibold text-gray-900">Project Report</p>
+            <p className="text-sm text-gray-600">
+              <span className="font-medium text-gray-700">ID:</span> {na(p.id)}
+            </p>
+            <p className="text-sm text-gray-600">
+              <span className="font-medium text-gray-700">Reference:</span> {shortCode}
+            </p>
+            <p className="text-sm text-gray-600">
+              <span className="font-medium text-gray-700">Date:</span> {reportDate}
+            </p>
+            <div className="flex justify-end pt-1">
+              <span className={projectStatusBadgeClasses(p.status)}>{p.status}</span>
             </div>
-            <div className="print-title-block" style={{ flex: 1 }}>
-              <h1>Project Report</h1>
-              <div className="print-meta">
-                <div>
-                  <strong>Project ID:</strong> {p.id}
-                </div>
-                <div>
-                  <strong>Short code:</strong> {shortCode}
-                </div>
-                <div>
-                  <strong>Updated:</strong>{' '}
-                  {p.updated_at ? new Date(p.updated_at).toLocaleString() : new Date(p.created_at).toLocaleString()}
-                </div>
-                <div style={{ marginTop: 8 }}>
-                  <span className={statusBadgeClass(p.status)}>{p.status}</span>
-                </div>
+          </div>
+        </header>
+
+        <div className="space-y-6">
+          <Section title="Project info">
+            <div className="grid gap-4 text-sm sm:grid-cols-2">
+              <div className="space-y-1 sm:col-span-2">
+                <p className="text-xs font-medium text-gray-500">Project name</p>
+                <p className="text-base font-medium text-gray-900">{na(p.name)}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-500">Department</p>
+                <p className="text-gray-900">{na(p.department_label || p.department_id)}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-500">Linked PO / vendor</p>
+                <p className="text-gray-900">{poLine}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-500">Project manager</p>
+                <p className="text-gray-900">{na(p.pm?.name?.trim() || p.pm?.email?.trim())}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-gray-500">Team lead</p>
+                <p className="text-gray-900">{na(p.team_lead?.name?.trim() || p.team_lead?.email?.trim())}</p>
+              </div>
+              <div className="space-y-1 sm:col-span-2">
+                <p className="text-xs font-medium text-gray-500">Assigned employees</p>
+                <p className="text-gray-900">{employees}</p>
               </div>
             </div>
-          </header>
+          </Section>
 
-          <section className="print-section">
-            <h2>Details</h2>
-            <dl className="print-kv">
-              <dt>Project name</dt>
-              <dd>{p.name}</dd>
-              <dt>Department</dt>
-              <dd>{p.department_label ?? p.department_id}</dd>
-              <dt>Project manager</dt>
-              <dd>{p.pm?.name?.trim() || p.pm?.email?.trim() || '—'}</dd>
-              <dt>Team lead</dt>
-              <dd>{p.team_lead?.name?.trim() || p.team_lead?.email?.trim() || '—'}</dd>
-              <dt>Assigned employees</dt>
-              <dd>
-                {p.assigned_employees.length
-                  ? p.assigned_employees.map((e) => e.name || e.email || e.id).join(', ')
-                  : '—'}
-              </dd>
-              <dt>Linked PO / vendor</dt>
-              <dd>
-                {po
-                  ? `${po.po?.trim() || po.po_number?.trim() || po.id.slice(0, 8)}${po.vendor ? ` · ${po.vendor}` : ''}`
-                  : 'No linked PO'}
-              </dd>
-            </dl>
-          </section>
+          <Section title="Financial overview">
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+              <dl className="grid gap-3 text-sm">
+                <div className="flex flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-4">
+                  <dt className="text-gray-600">Total budget</dt>
+                  <dd className="text-right font-semibold tabular-nums text-gray-900">
+                    {financial ? formatPkrSafe(financial.totalBudget) : 'N/A'}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-4">
+                  <dt className="text-gray-600">Consumed</dt>
+                  <dd className="text-right tabular-nums text-gray-900">
+                    {financial ? formatPkrSafe(financial.consumed) : 'N/A'}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-0.5 sm:flex-row sm:justify-between sm:gap-4">
+                  <dt className="text-gray-600">Remaining</dt>
+                  <dd className="text-right font-semibold tabular-nums text-gray-900">
+                    {financial ? formatPkrSafe(financial.remaining) : 'N/A'}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          </Section>
 
-          <section className="print-section">
-            <h2>Related purchase requests</h2>
-            <div className="print-table-wrap">
-              <table className="print-table">
+          <Section title="Linked PRs">
+            <div className="overflow-x-auto rounded-lg border border-gray-200">
+              <table className="w-full min-w-[560px] border-collapse text-sm">
                 <thead>
-                  <tr>
-                    <th>PR ID</th>
-                    <th>Description</th>
-                    <th>Amount</th>
-                    <th>Status</th>
-                    <th>Created</th>
+                  <tr className="bg-gray-100 text-left text-gray-700">
+                    <th className="border-b border-gray-200 px-3 py-2 font-semibold">PR ID</th>
+                    <th className="border-b border-gray-200 px-3 py-2 font-semibold">Description</th>
+                    <th className="border-b border-gray-200 px-3 py-2 text-right font-semibold tabular-nums">Amount</th>
+                    <th className="border-b border-gray-200 px-3 py-2 font-semibold">Status</th>
+                    <th className="border-b border-gray-200 px-3 py-2 font-semibold">Created</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="text-gray-800">
                   {prs.length === 0 ? (
                     <tr>
-                      <td colSpan={5} style={{ color: '#6b7280' }}>
+                      <td colSpan={5} className="border-b border-gray-200 px-3 py-3 text-center text-gray-500">
                         No purchase requests for this project.
                       </td>
                     </tr>
                   ) : (
                     prs.map((r) => (
-                      <tr key={r.id}>
-                        <td>{r.id.slice(0, 8)}…</td>
-                        <td>{r.description}</td>
-                        <td>{formatPkr(Number(r.amount))}</td>
-                        <td>{r.status.replaceAll('_', ' ')}</td>
-                        <td>{new Date(r.created_at).toLocaleString()}</td>
+                      <tr key={r.id} className="break-inside-avoid">
+                        <td className="border-b border-gray-200 px-3 py-2 align-top font-mono text-xs">{`${r.id.slice(0, 8)}…`}</td>
+                        <td className="border-b border-gray-200 px-3 py-2 align-top">{na(r.description)}</td>
+                        <td className="border-b border-gray-200 px-3 py-2 text-right align-top tabular-nums">
+                          {formatPkrSafe(r.amount)}
+                        </td>
+                        <td className="border-b border-gray-200 px-3 py-2 align-top">
+                          <span className={prStatusBadgeClasses(r.status)}>{r.status.replaceAll('_', ' ')}</span>
+                        </td>
+                        <td className="border-b border-gray-200 px-3 py-2 align-top text-gray-600">
+                          {r.created_at ? new Date(r.created_at).toLocaleString() : 'N/A'}
+                        </td>
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
             </div>
-          </section>
-
-          <section className="print-section">
-            <h2>Financial summary</h2>
-            <dl className="print-kv">
-              <dt>Total budget / PO value</dt>
-              <dd>{financial ? formatPkr(financial.totalBudget) : '—'}</dd>
-              <dt>Consumed</dt>
-              <dd>{financial ? formatPkr(financial.consumed) : '—'}</dd>
-              <dt>Remaining</dt>
-              <dd>{financial ? formatPkr(financial.remaining) : '—'}</dd>
-            </dl>
-          </section>
-
-          <footer className="print-footer">
-            Generated {new Date().toLocaleString()} · Procurement Management System
-          </footer>
-
-          <div className="print-hint no-print">
-            When the print dialog opens, choose <strong>Save as PDF</strong> to download.
-          </div>
+          </Section>
         </div>
+
+        <footer className="mt-10 border-t border-gray-100 pt-6 text-center text-xs text-gray-400">
+          Generated by {APP_NAME}
+          <br />
+          {new Date().toLocaleString()}
+        </footer>
+
+        <p className="no-print mt-6 rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-3 text-center text-xs text-gray-600">
+          When the print dialog opens, choose <span className="font-semibold text-gray-800">Save as PDF</span>.
+        </p>
       </div>
     </div>
   );

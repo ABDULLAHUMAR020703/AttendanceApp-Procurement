@@ -1,3 +1,4 @@
+import { appEmailSubject } from '../../config/appMeta';
 import { env } from '../../config/env';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
@@ -280,13 +281,13 @@ export async function createPurchaseRequest(params: {
         userId: createdBy,
         type: 'pr_created',
         message: `Your Purchase Request ${pr.id} was submitted and is now pending approvals.`,
-        emailSubject: 'PR Created',
+        emailSubject: appEmailSubject('PR Created'),
       },
       {
         userId: pmRowId,
         type: 'pr_submitted_for_project',
         message: `A new purchase request (${String(pr.id).slice(0, 8)}…) was submitted on your project.`,
-        emailSubject: 'New purchase request',
+        emailSubject: appEmailSubject('New purchase request'),
       },
     ],
   });

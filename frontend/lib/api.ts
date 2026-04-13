@@ -91,3 +91,32 @@ export async function authedFetchWithSupabase<T>(
   return authedFetch<T>(path, token, init);
 }
 
+/** For DELETE / 204 responses with no JSON body. */
+export async function authedFetchWithSupabaseNoContent(
+  supabase: SupabaseClient | null,
+  path: string,
+  init?: RequestInit,
+): Promise<void> {
+  const token = await getAccessTokenFromSupabaseSession(supabase);
+  const res = await fetch(`${backendBase}${path}`, {
+    ...init,
+    headers: {
+      ...(init?.headers ?? {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!res.ok) {
+    let body: Record<string, unknown> = {};
+    try {
+      const text = await res.text();
+      if (text) {
+        const json = JSON.parse(text) as unknown;
+        if (json && typeof json === 'object' && !Array.isArray(json)) body = json as Record<string, unknown>;
+      }
+    } catch {
+      // ignore
+    }
+    throw new ApiError(res.status, body);
+  }
+}
+

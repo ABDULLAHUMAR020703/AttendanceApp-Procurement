@@ -1,9 +1,10 @@
+import { appEmailSubject } from '../../config/appMeta';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { recordTrackedAction } from '../auditLogs/trackedAction';
 import type { UserRole } from '../auth/types';
-import type { Department } from '../auth/types';
-import { bypassesDepartmentScope, DEPARTMENTS, isDeptManagerRole } from '../auth/types';
+import { bypassesDepartmentScope, isDeptManagerRole } from '../auth/types';
+import { resolveDepartmentCode } from '../departments/service';
 import {
   assertActorMayManageProject,
   assertUserEligibleTeamLead,
@@ -18,21 +19,15 @@ type CreateProjectInput = {
   actorRole: UserRole;
   actorDepartment: string | null;
   /** FK to departments.code; admin picks freely; PM/dept_head must match profile. */
-  departmentId: Department;
+  departmentId: string;
   /** Department PM responsible for this project (approval workflow). */
   pmId: string;
   teamLeadId: string;
   assignedEmployeeIds: string[];
 };
 
-function normalizeDepartment(value: string | null | undefined): Department | null {
-  if (!value) return null;
-  if (!DEPARTMENTS.includes(value as Department)) return null;
-  return value as Department;
-}
-
-function resolveProjectDepartmentForCreate(input: CreateProjectInput): Department {
-  const fromBody = normalizeDepartment(input.departmentId);
+async function resolveProjectDepartmentForCreate(input: CreateProjectInput): Promise<string> {
+  const fromBody = await resolveDepartmentCode(input.departmentId);
   if (!fromBody) throw new AppError('department_id is required', 400);
   if (fromBody === 'management') {
     throw new AppError('Projects cannot be assigned to the management department', 400);
@@ -43,7 +38,7 @@ function resolveProjectDepartmentForCreate(input: CreateProjectInput): Departmen
   }
 
   if (isDeptManagerRole(input.actorRole)) {
-    const actorDept = normalizeDepartment(input.actorDepartment ?? undefined);
+    const actorDept = await resolveDepartmentCode(input.actorDepartment ?? undefined);
     if (!actorDept) throw new AppError('Your profile must have a department to create projects', 400);
     if (actorDept === 'management') {
       throw new AppError('Use an operational department account to create projects', 403);
@@ -122,7 +117,7 @@ export async function updateProjectMemberAssignments(params: {
       userId: project.pm_id as string,
       type: 'project_members_updated',
       message: 'Project member assignments were updated.',
-      emailSubject: 'Project members updated',
+      emailSubject: appEmailSubject('Project members updated'),
     });
   }
   if (project.team_lead_id && project.team_lead_id !== project.pm_id) {
@@ -130,7 +125,7 @@ export async function updateProjectMemberAssignments(params: {
       userId: project.team_lead_id as string,
       type: 'project_members_updated',
       message: 'Project member assignments were updated.',
-      emailSubject: 'Project members updated',
+      emailSubject: appEmailSubject('Project members updated'),
     });
   }
 
@@ -153,7 +148,7 @@ export async function updateProjectMemberAssignments(params: {
 
 export async function createProjectWithExceptionFlow(input: CreateProjectInput) {
   const { name, poId, budget, createdBy, actorRole, pmId, teamLeadId, assignedEmployeeIds } = input;
-  const departmentId = resolveProjectDepartmentForCreate(input);
+  const departmentId = await resolveProjectDepartmentForCreate(input);
 
   if (!name.trim()) throw new AppError('Project name is required', 400);
 
@@ -214,7 +209,7 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
           userId: pmId,
           type: 'project_created',
           message: `New project "${name}" was created; you are assigned as PM.`,
-          emailSubject: 'New project created',
+          emailSubject: appEmailSubject('New project created'),
         },
       ],
     });
@@ -274,13 +269,13 @@ export async function createProjectWithExceptionFlow(input: CreateProjectInput) 
         userId: pmId,
         type: 'exception_no_po_pending',
         message,
-        emailSubject: 'No-PO Exception Approval Required',
+        emailSubject: appEmailSubject('No-PO Exception Approval Required'),
       },
       {
         userId: createdBy,
         type: 'no_po_exception_pending',
         message: creatorMessage,
-        emailSubject: 'No-PO Exception Pending Approval',
+        emailSubject: appEmailSubject('No-PO Exception Pending Approval'),
       },
     ],
   });
@@ -351,7 +346,7 @@ export async function archiveProject(params: { projectId: string; actorUserId: s
       userId: project.pm_id as string,
       type: 'project_archived',
       message: `Project "${projectId.slice(0, 8)}…" was archived.`,
-      emailSubject: 'Project archived',
+      emailSubject: appEmailSubject('Project archived'),
     });
   }
 
@@ -416,7 +411,7 @@ export async function updateProjectTeamLead(params: {
       userId: project.pm_id as string,
       type: 'project_team_lead_updated',
       message: 'Team lead was updated on a project you manage.',
-      emailSubject: 'Team lead updated',
+      emailSubject: appEmailSubject('Team lead updated'),
     });
   }
   if (teamLeadId && teamLeadId !== project.pm_id) {
@@ -424,7 +419,7 @@ export async function updateProjectTeamLead(params: {
       userId: teamLeadId,
       type: 'project_team_lead_assigned',
       message: 'You were set as team lead on a project.',
-      emailSubject: 'Team lead assignment',
+      emailSubject: appEmailSubject('Team lead assignment'),
     });
   }
 

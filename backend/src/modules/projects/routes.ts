@@ -18,33 +18,22 @@ import {
 import { budgetPairFromRow, type PurchaseOrderDbRow } from '../po/groupByPo';
 import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
 import { bypassesDepartmentScope, isDeptManagerRole } from '../auth/types';
+import { hasPermission, requirePermission } from '../../middleware/permissions';
 
 export const projectsRouter = Router();
 
 projectsRouter.use(requireAuth);
+projectsRouter.use(requirePermission('view_projects'));
 
-const DepartmentSchema = z.enum([
-  'sales',
-  'hr',
-  'technical',
-  'finance',
-  'engineering',
-  'management',
-  'ibs',
-  'power',
-  'civil_works',
-  'bss_wireless',
-  'fixed_network',
-  'warehouse',
-]);
+const DepartmentIdSchema = z.string().min(1).max(64).regex(/^[a-z0-9_]+$/);
 
-projectsRouter.post('/', requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
+projectsRouter.post('/', requirePermission('view_budget'), requireRole('admin', 'pm', 'dept_head'), async (req, res, next) => {
   try {
     const Schema = z.object({
       name: z.string().min(1).max(200),
       po_id: z.string().uuid().optional().nullable(),
       budget: z.coerce.number().positive().optional(),
-      department_id: DepartmentSchema,
+      department_id: DepartmentIdSchema,
       pm_id: z.string().uuid(),
       team_lead_id: z.string().uuid(),
       assigned_employee_ids: z.array(z.string().uuid()).optional().default([]),
@@ -188,7 +177,21 @@ projectsRouter.get('/', requireRole('admin', 'pm', 'dept_head', 'employee'), asy
       };
     });
 
-    res.json({ projects: enriched });
+    const canBudget = hasPermission(req, 'view_budget');
+    const visible = canBudget
+      ? enriched
+      : enriched.map((row) => {
+          const po = row.purchase_order as { total_value?: unknown; remaining_value?: unknown } | null;
+          return {
+            ...row,
+            budget: null,
+            purchase_order: po
+              ? { ...po, total_value: null, remaining_value: null }
+              : po,
+          };
+        });
+
+    res.json({ projects: visible });
   } catch (err) {
     next(err);
   }
@@ -308,19 +311,35 @@ projectsRouter.get('/:id', requireRole('admin', 'pm', 'dept_head', 'employee'), 
       relatedPurchaseRequests = (prRows ?? []) as typeof relatedPurchaseRequests;
     }
 
+    const canBudget = hasPermission(req, 'view_budget');
+    const projectOut = {
+      ...project,
+      budget: canBudget ? project.budget : null,
+      department_label: deptRow?.display_name ?? project.department_id,
+      updatedBy: updater ?? null,
+      last_updated_at: projectAudit.last_updated_at,
+      last_updated_by: projectAudit.last_updated_by,
+      pm: pmProfile,
+      team_lead: teamLeadProfile,
+      assigned_employees: assignedEmployees,
+    };
+    let purchaseOrderOut: typeof purchaseOrder = purchaseOrder;
+    if (!canBudget && purchaseOrder && typeof purchaseOrder === 'object') {
+      purchaseOrderOut = {
+        ...purchaseOrder,
+        total_value: null,
+        remaining_value: null,
+      };
+    }
+    const relatedOut =
+      includeRelatedPrs && !canBudget
+        ? relatedPurchaseRequests.map((r) => ({ ...r, amount: null as unknown as number }))
+        : relatedPurchaseRequests;
+
     res.json({
-      project: {
-        ...project,
-        department_label: deptRow?.display_name ?? project.department_id,
-        updatedBy: updater ?? null,
-        last_updated_at: projectAudit.last_updated_at,
-        last_updated_by: projectAudit.last_updated_by,
-        pm: pmProfile,
-        team_lead: teamLeadProfile,
-        assigned_employees: assignedEmployees,
-      },
-      purchaseOrder,
-      ...(includeRelatedPrs ? { relatedPurchaseRequests } : {}),
+      project: projectOut,
+      purchaseOrder: purchaseOrderOut,
+      ...(includeRelatedPrs ? { relatedPurchaseRequests: relatedOut } : {}),
     });
   } catch (err) {
     next(err);

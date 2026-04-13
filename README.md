@@ -1,4 +1,4 @@
-# Hadir.AI Procurement — Application Flow
+# Tehsil.ai — Application Flow
 
 This document describes **how people move through the app**: who signs in, how purchase orders (POs) get into the system, how projects and purchase requests work, and how approvals run.
 

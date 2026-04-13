@@ -180,7 +180,7 @@ export default function ProjectsPage() {
   });
 
   const { data: departmentsData } = useQuery({
-    queryKey: ['departments', 'list'],
+    queryKey: ['departments'],
     enabled: !!token && !!supabase && (profile?.role === 'admin' || isDeptManagerRole(profile?.role)),
     queryFn: async () => {
       try {

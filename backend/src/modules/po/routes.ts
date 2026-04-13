@@ -7,6 +7,7 @@ import { loadEmployeeVisibleProjectIds } from '../projects/projectAccess';
 import { searchPoLinesForProject } from './searchLines';
 import { groupPurchaseOrdersByPo, type PurchaseOrderDbRow } from './groupByPo';
 import { parsePoUploadFile, calcRemainingAmount, type ParsedLineItemRow } from './service';
+import { appEmailSubject } from '../../config/appMeta';
 import { supabaseAdmin } from '../../config/supabase';
 import { AppError } from '../../utils/errors';
 import { recordTrackedAction } from '../auditLogs/trackedAction';
@@ -14,10 +15,12 @@ import { getAdminUserIds } from '../notifications/service';
 import { attachLastUpdatedFields } from '../auditLogs/lastUpdated';
 import { getLastTransactionForPO } from './lastTransaction';
 import { bypassesDepartmentScope, isDeptManagerRole, type UserRole } from '../auth/types';
+import { requirePermission } from '../../middleware/permissions';
 
 export const poRouter = Router();
 
 poRouter.use(requireAuth);
+poRouter.use(requirePermission('view_pos'));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -208,7 +211,7 @@ poRouter.post('/upload', requireRole('admin', 'pm', 'dept_head'), upload.single(
         userId: id,
         type: isDeptManagerRole(actorRole) ? 'pm_po_upload' : 'po_upload',
         message: uploadSummary,
-        emailSubject: 'PO data uploaded',
+        emailSubject: appEmailSubject('PO data uploaded'),
       }));
 
       if (result.firstEntityId) {
@@ -347,7 +350,7 @@ poRouter.post('/upload', requireRole('admin', 'pm', 'dept_head'), upload.single(
         userId: id,
         type: 'po_upload_legacy',
         message: legacyMsg,
-        emailSubject: 'PO upload',
+        emailSubject: appEmailSubject('PO upload'),
       })),
     });
 
